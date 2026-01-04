@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install build tools
-        run: sudo apt update && sudo apt install -y build-essential
+        run: sudo apt update && sudo apt install -y build-essential python3 python3-pip netcat
 
       - name: Build server and client
         run: |
@@ -27,6 +27,12 @@ jobs:
         run: |
           BUILD_ID=${GITHUB_RUN_NUMBER}
           echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
+
+      - name: Run tests
+        run: |
+          make stop-server || true   # Ensure any previous server is stopped
+          make test                  # Runs your Python test suite
+          make stop-server           # Stop server after tests
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

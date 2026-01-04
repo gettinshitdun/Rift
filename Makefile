@@ -42,4 +42,14 @@ run-server: $(SERVER)
 run-client: $(CLIENT)
 	./$(CLIENT)
 
+test: $(SERVER)
+	@echo "Running tests..."
+	@for t in tests/test_*.py; do \
+		echo "==> $$t"; \
+		python3 $$t || exit 1; \
+	done
+
+stop-server:
+	pgrep rift-server >/dev/null 2>&1 && pkill -f rift-server || echo "No rift-server running"
+
 .PHONY: all clean run-server run-client
