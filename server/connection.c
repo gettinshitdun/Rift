@@ -5,6 +5,7 @@
 #include <sys/epoll.h>
 
 static connection_t connections[MAX_CONNECTIONS];
+static int active_connections = 0;
 
 void connection_init(void) {
     memset(connections, 0, sizeof(connections));
@@ -16,6 +17,7 @@ void connection_add(int fd, int type) {
             connections[i].fd = fd;
             connections[i].type = type;
             connections[i].peer_fd = 0;
+            active_connections++;
 
             // Try to pair
             int peer_fd = connection_get_unpaired(type ^ 1); // opposite type
@@ -67,6 +69,7 @@ void connection_close(int epfd, int fd) {
             connections[i].fd = 0;
             connections[i].peer_fd = 0;
             connections[i].type = 0;
+            active_connections--;
         }
     }
     printf("[connection] closed fd=%d\n", fd);
@@ -76,4 +79,8 @@ void connection_close(int epfd, int fd) {
         printf("[connection] closing peer fd=%d\n", peer);
         connection_close(epfd, peer); // recursive call
     }
+}
+
+int connection_active_count() {
+    return active_connections;
 }

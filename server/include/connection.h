@@ -27,4 +27,5 @@ void connection_close(int epfd, int fd);
 // Get first unpaired client of a type
 int connection_get_unpaired(int type);
 
+int connection_active_count();
 #endif

@@ -15,4 +15,6 @@ add_executable(rift
         server/listner.c
         server/connection.c
         server/forward.c
+        server/metrics.c
+        server/include/metrics.h
 )
