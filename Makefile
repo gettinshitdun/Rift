@@ -7,17 +7,9 @@ INCLUDES:= -Iinclude
 SERVER  := rift-server
 CLIENT  := rift-client
 
-# Source files
-SERVER_SRCS := \
-	server/main.c \
-#	server/epoll_loop.c \
-#	server/listener.c \
-#	protocol/frame.c
-
-CLIENT_SRCS := \
-	client/main.c \
-#	client/local_proxy.c \
-#	protocol/frame.c
+# Automatically find all .c files
+SERVER_SRCS := $(wildcard server/*.c)
+CLIENT_SRCS := $(wildcard client/*.c)
 
 # Object files
 SERVER_OBJS := $(SERVER_SRCS:.c=.o)

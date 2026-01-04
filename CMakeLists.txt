@@ -7,9 +7,12 @@ add_executable(rift
         server/main.c
         client/main.c
         server/epoll_server.c
-        server/server.h
-        server/epoll_loop.h
-        server/listener.h
-        server/connection.h
-        server/forward.h
+        server/include/server.h
+        server/include/epoll_loop.h
+        server/include/listener.h
+        server/include/connection.h
+        server/include/forward.h
+        server/listner.c
+        server/connection.c
+        server/forward.c
 )

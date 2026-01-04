@@ -8,6 +8,11 @@
 
 #define MAX_CONNECTIONS 8192
 
+/*
+    fd is the source of the data (the sender)
+    peer_fd is the destination (the receiver)
+ */
+
 typedef struct {
     int fd;
     int peer_fd;
@@ -27,6 +32,5 @@ int connection_get_peer(int fd);
 
 // Close connection and its peer
 void connection_close(int epfd, int fd);
-
 
 #endif //RIFT_CONNECTION_H
