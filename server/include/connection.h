@@ -1,36 +1,30 @@
-//
-// Created by kanishak on 1/4/26.
-//
-// server/connection.h
-
 #ifndef RIFT_CONNECTION_H
 #define RIFT_CONNECTION_H
 
-#define MAX_CONNECTIONS 8192
-
-/*
-    fd is the source of the data (the sender)
-    peer_fd is the destination (the receiver)
- */
+#define MAX_CONNECTIONS 1024
 
 typedef struct {
     int fd;
-    int peer_fd;
+    int peer_fd;   // fd this connection forwards to
+    int type;      // 0 = tunnel, 1 = public
 } connection_t;
 
 // Initialize connection table
 void connection_init(void);
 
-// Register a new connection
-void connection_add(int fd);
+// Add a new client
+void connection_add(int fd, int type);
 
-// Pair two connections
-void connection_pair(int fd1, int fd2);
-
-// Get peer fd (or -1)
+// Get peer
 int connection_get_peer(int fd);
 
-// Close connection and its peer
+// Set peer
+void connection_set_peer(int fd, int peer_fd);
+
+// Close connection
 void connection_close(int epfd, int fd);
 
-#endif //RIFT_CONNECTION_H
+// Get first unpaired client of a type
+int connection_get_unpaired(int type);
+
+#endif

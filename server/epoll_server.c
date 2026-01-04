@@ -14,20 +14,15 @@
 
 #define MAX_EVENTS 64
 
-// Handle new tunnel/public clients
-void handle_new_clients(int epfd, int listener_fd, const char *type) {
+void handle_new_clients(int epfd, int listener_fd, int type, const char *type_str) {
     struct epoll_event ev;
     int client_fd;
     while ((client_fd = listener_accept(listener_fd)) > 0) {
-        connection_add(client_fd);
-        ev.events = EPOLLIN | EPOLLET; // edge-triggered
+        connection_add(client_fd, type);  // pass type here
+        ev.events = EPOLLIN | EPOLLET;
         ev.data.fd = client_fd;
-        if (epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &ev) < 0) {
-            perror("epoll_ctl add client_fd");
-            close(client_fd);
-            continue;
-        }
-        printf("[server] %s client connected: fd=%d\n", type, client_fd);
+        epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &ev);
+        printf("[server] %s client connected: fd=%d\n", type_str, client_fd);
     }
 }
 
@@ -85,11 +80,16 @@ int epoll_server_main() {
 
         for (int i = 0; i < nfds; ++i) {
             int fd = events[i].data.fd;
-
+            if (events[i].events & (EPOLLHUP | EPOLLERR)) {
+                // Peer disconnected or socket error
+                printf("[server] fd %d disconnected\n", fd);
+                connection_close(epfd, fd);
+                continue;
+            }
             if (fd == tunnel_listener) {
-                handle_new_clients(epfd, tunnel_listener, "tunnel");
+                handle_new_clients(epfd, tunnel_listener,0, "tunnel");
             } else if (fd == public_listener) {
-                handle_new_clients(epfd, public_listener, "public");
+                handle_new_clients(epfd, public_listener,1, "public");
             } else {
                 handle_existing_connection(epfd, fd);
             }
