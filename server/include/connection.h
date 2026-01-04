@@ -1,7 +1,7 @@
 #ifndef RIFT_CONNECTION_H
 #define RIFT_CONNECTION_H
 
-#define MAX_CONNECTIONS 1024
+#define MAX_CONNECTIONS 102400
 
 typedef struct {
     int fd;
