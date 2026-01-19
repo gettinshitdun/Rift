@@ -1,55 +1,42 @@
-# Compiler and flags
-CC      := gcc
-CFLAGS  := -Wall -Wextra -Werror -O2 -g
-INCLUDES:= -Iinclude
+CC = gcc
+CFLAGS = -Wall -Wextra -Werror -O2 -g -Iserver/include
+
+SERVER_SRCS = $(wildcard server/*.c)
+CLIENT_SRCS = $(wildcard client/*.c)
+
+
+# Convert .c lists to .o lists
+SERVER_OBJS = $(SERVER_SRCS:.c=.o)
+CLIENT_OBJS = $(CLIENT_SRCS:.c=.o)
+
+# Identify the core logic files that the client "borrows" from the server directory
+SHARED_OBJS = server/forward.o server/frame.o
 
 # Binaries
-SERVER  := rift-server
-CLIENT  := rift-client
+SERVER_BIN = rift-server
+CLIENT_BIN = rift-client
 
-# Automatically find all .c files
-SERVER_SRCS := $(wildcard server/*.c)
-CLIENT_SRCS := $(wildcard client/*.c)
+all: $(SERVER_BIN) $(CLIENT_BIN)
 
-# Object files
-SERVER_OBJS := $(SERVER_SRCS:.c=.o)
-CLIENT_OBJS := $(CLIENT_SRCS:.c=.o)
-
-# Default target
-all: $(SERVER) $(CLIENT)
-
-# Build server
-$(SERVER): $(SERVER_OBJS)
+# Link the server (links all objects found in server/ folder)
+$(SERVER_BIN): $(SERVER_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-# Build client
-$(CLIENT): $(CLIENT_OBJS)
+# Link the client (links client objects + the shared logic from server folder)
+$(CLIENT_BIN): $(CLIENT_OBJS) $(SHARED_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^
 
-# Compile .c → .o
+# Rule for any .o file - Includes automatic dependency tracking for .h files
 %.o: %.c
-	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
-# Clean build artifacts
+run-server: $(SERVER_BIN)
+	./$(SERVER_BIN)
+
+run-client: $(CLIENT_BIN)
+	./$(CLIENT_BIN) expose 3000
+
 clean:
-	rm -f $(SERVER) $(CLIENT) $(SERVER_OBJS) $(CLIENT_OBJS)
-
-# Run server (example)
-run-server: $(SERVER)
-	./$(SERVER)
-
-# Run client (example)
-run-client: $(CLIENT)
-	./$(CLIENT)
-
-test: $(SERVER)
-	@echo "Running tests..."
-	@for t in tests/test_*.py; do \
-		echo "==> $$t"; \
-		python3 $$t || exit 1; \
-	done
-
-stop-server:
-	pgrep rift-server >/dev/null 2>&1 && pkill -f rift-server || echo "No rift-server running"
+	rm -f $(SERVER_BIN) $(CLIENT_BIN) server/*.o client/*.o
 
 .PHONY: all clean run-server run-client

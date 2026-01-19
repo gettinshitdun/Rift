@@ -50,16 +50,23 @@ void connection_add_public(int fd) {
     c->state = CONN_PUBLIC_INIT;
 }
 
-void connection_bind(int fd1, int fd2) {
-    connection_t *a = connection_get(fd1);
-    connection_t *b = connection_get(fd2);
-    if (!a || !b) return;
+void connection_bind(int browser_fd, int tunnel_fd) {
+    connection_t *b = connection_get(browser_fd);
+    connection_t *t = connection_get(tunnel_fd);
+    if (!b || !t) return;
 
-    a->peer_fd = fd2;
-    b->peer_fd = fd1;
+    // Link them together
+    b->peer_fd = tunnel_fd;
+    t->peer_fd = browser_fd;
 
-    a->state = CONN_PUBLIC_FORWARDING;
-    b->state = CONN_TUNNEL_READY;
+    // The Browser FD is now purely for forwarding raw bytes
+    b->state = CONN_PUBLIC_FORWARDING;
+
+    // The Tunnel FD stays in TUNNEL_READY to keep processing RIFT frames.
+    // We only update it if it wasn't already ready.
+    if (t->state != CONN_TUNNEL_READY) {
+        t->state = CONN_TUNNEL_READY;
+    }
 }
 
 void connection_close(int epfd, int fd) {

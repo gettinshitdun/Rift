@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/epoll.h>
+#include <sys/socket.h>
 #include <errno.h>
 #include <string.h>
 
@@ -10,6 +11,7 @@
 #include "include/forward.h"
 #include "include/metrics.h"
 #include "include/frame.h"
+#include "include/handlers.h" 
 
 #define MAX_EVENTS 64
 
@@ -62,10 +64,17 @@ void handle_health_request(int listener_fd) {
 
 /* ------------------------- Listener handlers ------------------------- */
 
+
 static void handle_new_public(int epfd, int listener_fd) {
     int fd;
     while ((fd = listener_accept(listener_fd)) > 0) {
+        // 1. Add the connection to the internal table
         connection_add_public(fd);
+        
+        // 2. Fetch the pointer to the connection we just created
+        connection_t *c = connection_get(fd);
+        if (c) c->state = CONN_PUBLIC_INIT; 
+        
         metrics_inc_total_connections();
         epoll_add_fd(epfd, fd, EPOLLIN | EPOLLHUP | EPOLLERR);
         printf("[server] public connected fd=%d\n", fd);
@@ -75,7 +84,13 @@ static void handle_new_public(int epfd, int listener_fd) {
 static void handle_new_tunnel(int epfd, int listener_fd) {
     int fd;
     while ((fd = listener_accept(listener_fd)) > 0) {
+        // 1. Add the connection to the internal table
         connection_add_tunnel(fd);
+        
+        // 2. Fetch the pointer to the connection we just created
+        connection_t *c = connection_get(fd);
+        if (c) c->state = CONN_TUNNEL_INIT;
+
         metrics_inc_total_connections();
         epoll_add_fd(epfd, fd, EPOLLIN | EPOLLHUP | EPOLLERR);
         printf("[server] tunnel connected fd=%d\n", fd);
@@ -85,66 +100,89 @@ static void handle_new_tunnel(int epfd, int listener_fd) {
 /* ------------------------- Connection handlers ------------------------- */
 
 static void handle_initial_frame(int epfd, int fd) {
-    frame_type_t type;
-    char payload[FRAME_MAX_PAYLOAD + 1];
-    uint16_t len;
-
-    if (frame_read(fd, &type, payload, &len) < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return;
-        connection_close(epfd, fd);
-        return;
+    char peek_buf[4];
+    // Peek just enough to distinguish the protocol
+    ssize_t n = recv(fd, peek_buf, 4, MSG_PEEK);
+    
+    if (n < 4) {
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        goto fail;
     }
 
-    connection_t *c = connection_get(fd);
-    if (!c) {
-        connection_close(epfd, fd);
-        return;
-    }
-
-    if (type == FRAME_REGISTER_TUNNEL) {
-        size_t copy_len = len < sizeof(c->tunnel_id) - 1 ? len : sizeof(c->tunnel_id) - 1;
-        memcpy(c->tunnel_id, payload, copy_len);
-        c->tunnel_id[copy_len] = '\0';
-
-        c->state = CONN_TUNNEL_READY;
-        printf("[tunnel] registered id=%s fd=%d\n", c->tunnel_id, fd);
-        return;
-    }
-
-    if (type == FRAME_CONNECT_REQUEST) {
-        size_t copy_len = len < sizeof(c->service_id) - 1 ? len : sizeof(c->service_id) - 1;
-        memcpy(c->service_id, payload, copy_len);
-        c->service_id[copy_len] = '\0';
-
-        connection_t *tunnel = connection_find_tunnel(c->service_id);
-        if (!tunnel) {
-            printf("[public] no tunnel for %s\n", c->service_id);
-            connection_close(epfd, fd);
-            return;
+    // 1. Identify RIFT Traffic (CLI Client)
+    if (memcmp(peek_buf, "RIFT", 4) == 0) {
+        if (handle_rift_frame(fd) == 0) return;
+    } 
+    // 2. Identify HTTP Traffic (Browser)
+    else if (memcmp(peek_buf, "GET ", 4) == 0 || memcmp(peek_buf, "POST", 4) == 0) {
+        char full_buf[2048];
+        ssize_t total = recv(fd, full_buf, sizeof(full_buf) - 1, 0); // Consume for parsing
+        if (total > 0) {
+            full_buf[total] = '\0';
+            if (handle_http_request(fd, full_buf) == 0) return;
         }
-
-        connection_bind(fd, tunnel->fd);
-        printf("[bind] public fd=%d -> tunnel fd=%d (%s)\n", fd, tunnel->fd, c->service_id);
-        return;
     }
 
+fail:
     connection_close(epfd, fd);
 }
 
 static void handle_connection_event(int epfd, int fd) {
     connection_t *c = connection_get(fd);
-    if (!c) {
-        connection_close(epfd, fd);
-        return;
-    }
+    if (!c) return;
 
+    // Trace every event
+    printf("[debug] Event on fd %d, State: %d, Peer: %d\n", fd, c->state, c->peer_fd);
+
+    // Handle initial handshakes first
     if (c->state == CONN_TUNNEL_INIT || c->state == CONN_PUBLIC_INIT) {
         handle_initial_frame(epfd, fd);
         return;
     }
 
-    if (c->peer_fd > 0) {
-        forward_data(fd, c->peer_fd);
+    // If we are in forwarding mode but peer is missing, something went wrong
+    if (c->peer_fd <= 0) {
+        connection_close(epfd, fd);
+        return;
+    }
+
+    char buf[FRAME_MAX_PAYLOAD];
+    frame_type_t type;
+    uint16_t len;
+
+    switch (c->state) {
+        case CONN_PUBLIC_FORWARDING:
+            /* DIRECTION: Browser -> Server -> Tunnel */
+            {
+                ssize_t n = read(fd, buf, sizeof(buf));
+                if (n <= 0) {
+                    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+                    connection_close(epfd, fd);
+                    return;
+                }
+                // Wrap raw HTTP bytes into a binary RIFT frame
+                if (frame_write(c->peer_fd, FRAME_DATA, buf, (uint16_t)n) < 0) {
+                    connection_close(epfd, fd);
+                }
+            }
+            break;
+
+        case CONN_TUNNEL_READY:
+            /* DIRECTION: Tunnel Client -> Server -> Browser */
+            if (frame_read(fd, &type, buf, &len) == 0) {
+                if (type == FRAME_DATA) {
+                    printf("[debug] Frame received from tunnel. Type: DATA, Len: %d\n", len);
+                    ssize_t sent = write(c->peer_fd, buf, len);
+                    if (sent > 0) {
+                        printf("[debug] Successfully wrote %ld bytes back to browser (fd: %d)\n", sent, c->peer_fd);
+                    } else {
+                        perror("[!] Write to browser failed");
+                    }
+                }
+            }
+
+        default:
+            break;
     }
 }
 
@@ -187,7 +225,7 @@ int epoll_server_main() {
     epoll_add_fd(epfd, public_listener, EPOLLIN);
     epoll_add_fd(epfd, health_listener, EPOLLIN);
 
-    printf("[server] running\n  tunnel : 7000\n  public : 9000\n  health : 8080\n");
+    printf("[server] RIFT active\n  tunnel : 7000\n  public : 9000\n  health : 8080\n");
 
     struct epoll_event events[MAX_EVENTS];
 
@@ -201,7 +239,8 @@ int epoll_server_main() {
 
         for (int i = 0; i < nfds; i++) {
             dispatch_event(epfd, events[i].data.fd, events[i].events, 
-                           tunnel_listener, public_listener, health_listener);
+                        tunnel_listener, public_listener, health_listener);
         }
     }
+    return 0;
 }
