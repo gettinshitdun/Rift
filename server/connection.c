@@ -9,78 +9,104 @@ static int active_connections = 0;
 
 void connection_init(void) {
     memset(connections, 0, sizeof(connections));
+    active_connections = 0;
 }
 
-void connection_add(int fd, int type) {
-    for (int i = 0; i < MAX_CONNECTIONS; ++i) {
+static connection_t* connection_alloc(int fd) {
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
         if (connections[i].fd == 0) {
+            memset(&connections[i], 0, sizeof(connection_t));
             connections[i].fd = fd;
-            connections[i].type = type;
-            connections[i].peer_fd = 0;
             active_connections++;
-
-            // Try to pair
-            int peer_fd = connection_get_unpaired(type ^ 1); // opposite type
-            if (peer_fd > 0) {
-                connections[i].peer_fd = peer_fd;
-                connection_set_peer(peer_fd, fd);
-                printf("[connection] paired fd %d <-> %d\n", fd, peer_fd);
-            }
-            return;
+            return &connections[i];
         }
     }
-    printf("[connection] warning: connection table full for fd=%d\n", fd);
+    return NULL;
 }
 
-int connection_get_peer(int fd) {
-    for (int i = 0; i < MAX_CONNECTIONS; ++i) {
+connection_t* connection_get(int fd) {
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
         if (connections[i].fd == fd)
-            return connections[i].peer_fd;
+            return &connections[i];
     }
-    return 0;
+    return NULL;
 }
 
-void connection_set_peer(int fd, int peer_fd) {
-    for (int i = 0; i < MAX_CONNECTIONS; ++i) {
-        if (connections[i].fd == fd) {
-            connections[i].peer_fd = peer_fd;
-            return;
-        }
+void connection_add_tunnel(int fd) {
+    connection_t *c = connection_alloc(fd);
+    if (!c) {
+        close(fd);
+        return;
     }
+    c->state = CONN_TUNNEL_INIT;
 }
 
-int connection_get_unpaired(int type) {
-    for (int i = 0; i < MAX_CONNECTIONS; ++i) {
-        if (connections[i].fd > 0 && connections[i].type == type && connections[i].peer_fd == 0)
-            return connections[i].fd;
+void connection_add_public(int fd) {
+    connection_t *c = connection_alloc(fd);
+    if (!c) {
+        close(fd);
+        return;
     }
-    return 0;
+    c->state = CONN_PUBLIC_INIT;
+}
+
+void connection_bind(int fd1, int fd2) {
+    connection_t *a = connection_get(fd1);
+    connection_t *b = connection_get(fd2);
+    if (!a || !b) return;
+
+    a->peer_fd = fd2;
+    b->peer_fd = fd1;
+
+    a->state = CONN_PUBLIC_FORWARDING;
+    b->state = CONN_TUNNEL_READY;
 }
 
 void connection_close(int epfd, int fd) {
-    int peer = connection_get_peer(fd);
+    connection_t *c = connection_get(fd);
+    if (!c || c->fd == 0) return;
 
-    // First, remove the current fd
+    int peer = c->peer_fd;
+
+    c->fd = 0;
+    c->peer_fd = 0;
+    c->state = 0;
+    c->tunnel_id[0] = '\0';
+    c->service_id[0] = '\0';
+    active_connections--;
+
     epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
     close(fd);
 
-    for (int i = 0; i < MAX_CONNECTIONS; ++i) {
-        if (connections[i].fd == fd) {
-            connections[i].fd = 0;
-            connections[i].peer_fd = 0;
-            connections[i].type = 0;
-            active_connections--;
+    if (peer > 0) {
+        connection_t *p = connection_get(peer);
+        if (p && p->peer_fd == fd) {
+            p->peer_fd = 0;
+            connection_close(epfd, peer);
         }
     }
-    printf("[connection] closed fd=%d\n", fd);
-
-    // If there is a peer, close it too
-    if (peer > 0) {
-        printf("[connection] closing peer fd=%d\n", peer);
-        connection_close(epfd, peer); // recursive call
-    }
 }
 
-int connection_active_count() {
+int connection_active_count(void) {
     return active_connections;
 }
+
+connection_t* connection_find_tunnel(const char *tunnel_id) {
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
+        connection_t *c = &connections[i];
+
+        if (c->fd == 0)
+            continue;
+
+        if (c->state != CONN_TUNNEL_READY)
+            continue;
+
+        if (c->peer_fd != 0)
+            continue;
+
+        if (strcmp(c->tunnel_id, tunnel_id) == 0)
+            return c;
+    }
+    return NULL;
+}
+

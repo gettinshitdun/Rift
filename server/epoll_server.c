@@ -1,17 +1,15 @@
-//
-// Created by kanishak on 1/4/26.
-//
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <errno.h>
+#include <string.h>
 
 #include "include/listener.h"
 #include "include/connection.h"
 #include "include/forward.h"
 #include "include/metrics.h"
+#include "include/frame.h"
 
 #define MAX_EVENTS 64
 
@@ -34,7 +32,6 @@ static void epoll_add_fd(int epfd, int fd, uint32_t events) {
 void handle_health_request(int listener_fd) {
     int client_fd;
     while ((client_fd = listener_accept(listener_fd)) > 0) {
-
         char body[512];
         int body_len = snprintf(body, sizeof(body),
             "status: OK\n"
@@ -56,13 +53,8 @@ void handle_health_request(int listener_fd) {
             body_len
         );
 
-        /* write header */
-        ssize_t w = write(client_fd, header, header_len);
-        (void)w; // silence -Wunused-result if you prefer
-
-        /* write body */
-        w = write(client_fd, body, body_len);
-        (void)w;
+        if (write(client_fd, header, header_len) < 0) perror("write header");
+        if (write(client_fd, body, body_len) < 0) perror("write body");
 
         close(client_fd);
     }
@@ -70,57 +62,106 @@ void handle_health_request(int listener_fd) {
 
 /* ------------------------- Listener handlers ------------------------- */
 
-static void handle_new_clients(
-    int epfd,
-    int listener_fd,
-    int conn_type,
-    const char *label
-) {
-    int client_fd;
-
-    while ((client_fd = listener_accept(listener_fd)) > 0) {
-        connection_add(client_fd, conn_type);
+static void handle_new_public(int epfd, int listener_fd) {
+    int fd;
+    while ((fd = listener_accept(listener_fd)) > 0) {
+        connection_add_public(fd);
         metrics_inc_total_connections();
-
-        epoll_add_fd(epfd, client_fd, EPOLLIN | EPOLLET | EPOLLHUP | EPOLLERR);
-        printf("[server] %s client connected: fd=%d\n", label, client_fd);
+        epoll_add_fd(epfd, fd, EPOLLIN | EPOLLHUP | EPOLLERR);
+        printf("[server] public connected fd=%d\n", fd);
     }
 }
 
-/* ------------------------- Connection handler ------------------------- */
+static void handle_new_tunnel(int epfd, int listener_fd) {
+    int fd;
+    while ((fd = listener_accept(listener_fd)) > 0) {
+        connection_add_tunnel(fd);
+        metrics_inc_total_connections();
+        epoll_add_fd(epfd, fd, EPOLLIN | EPOLLHUP | EPOLLERR);
+        printf("[server] tunnel connected fd=%d\n", fd);
+    }
+}
+
+/* ------------------------- Connection handlers ------------------------- */
+
+static void handle_initial_frame(int epfd, int fd) {
+    frame_type_t type;
+    char payload[FRAME_MAX_PAYLOAD + 1];
+    uint16_t len;
+
+    if (frame_read(fd, &type, payload, &len) < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+        connection_close(epfd, fd);
+        return;
+    }
+
+    connection_t *c = connection_get(fd);
+    if (!c) {
+        connection_close(epfd, fd);
+        return;
+    }
+
+    if (type == FRAME_REGISTER_TUNNEL) {
+        size_t copy_len = len < sizeof(c->tunnel_id) - 1 ? len : sizeof(c->tunnel_id) - 1;
+        memcpy(c->tunnel_id, payload, copy_len);
+        c->tunnel_id[copy_len] = '\0';
+
+        c->state = CONN_TUNNEL_READY;
+        printf("[tunnel] registered id=%s fd=%d\n", c->tunnel_id, fd);
+        return;
+    }
+
+    if (type == FRAME_CONNECT_REQUEST) {
+        size_t copy_len = len < sizeof(c->service_id) - 1 ? len : sizeof(c->service_id) - 1;
+        memcpy(c->service_id, payload, copy_len);
+        c->service_id[copy_len] = '\0';
+
+        connection_t *tunnel = connection_find_tunnel(c->service_id);
+        if (!tunnel) {
+            printf("[public] no tunnel for %s\n", c->service_id);
+            connection_close(epfd, fd);
+            return;
+        }
+
+        connection_bind(fd, tunnel->fd);
+        printf("[bind] public fd=%d -> tunnel fd=%d (%s)\n", fd, tunnel->fd, c->service_id);
+        return;
+    }
+
+    connection_close(epfd, fd);
+}
 
 static void handle_connection_event(int epfd, int fd) {
-    int peer = connection_get_peer(fd);
-
-    if (peer > 0) {
-        forward_data(fd, peer);
-    } else {
+    connection_t *c = connection_get(fd);
+    if (!c) {
         connection_close(epfd, fd);
+        return;
+    }
+
+    if (c->state == CONN_TUNNEL_INIT || c->state == CONN_PUBLIC_INIT) {
+        handle_initial_frame(epfd, fd);
+        return;
+    }
+
+    if (c->peer_fd > 0) {
+        forward_data(fd, c->peer_fd);
     }
 }
 
 /* ------------------------- Event dispatcher ------------------------- */
 
-static void dispatch_event(
-    int epfd,
-    int fd,
-    uint32_t events,
-    int tunnel_listener,
-    int public_listener,
-    int health_listener
-) {
+static void dispatch_event(int epfd, int fd, uint32_t events, int t_lsnr, int p_lsnr, int h_lsnr) {
     if (events & (EPOLLHUP | EPOLLERR)) {
-        printf("[server] fd %d disconnected\n", fd);
         connection_close(epfd, fd);
         return;
     }
 
-    if (fd == health_listener) {
-        handle_health_request(health_listener);
-    } else if (fd == tunnel_listener) {
-        handle_new_clients(epfd, tunnel_listener, 0, "tunnel");
-    } else if (fd == public_listener) {
-        handle_new_clients(epfd, public_listener, 1, "public");
+    if (fd == h_lsnr) {
+        handle_health_request(fd);
+    } else if (fd == t_lsnr) {
+        handle_new_tunnel(epfd, fd);
+    } else if (fd == p_lsnr) {
+        handle_new_public(epfd, fd);
     } else {
         handle_connection_event(epfd, fd);
     }
@@ -146,10 +187,7 @@ int epoll_server_main() {
     epoll_add_fd(epfd, public_listener, EPOLLIN);
     epoll_add_fd(epfd, health_listener, EPOLLIN);
 
-    printf("[server] running\n");
-    printf("  tunnel : 7000\n");
-    printf("  public : 9000\n");
-    printf("  health : 8080\n");
+    printf("[server] running\n  tunnel : 7000\n  public : 9000\n  health : 8080\n");
 
     struct epoll_event events[MAX_EVENTS];
 
@@ -162,14 +200,8 @@ int epoll_server_main() {
         }
 
         for (int i = 0; i < nfds; i++) {
-            dispatch_event(
-                epfd,
-                events[i].data.fd,
-                events[i].events,
-                tunnel_listener,
-                public_listener,
-                health_listener
-            );
+            dispatch_event(epfd, events[i].data.fd, events[i].events, 
+                           tunnel_listener, public_listener, health_listener);
         }
     }
 }
