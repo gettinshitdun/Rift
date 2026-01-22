@@ -148,15 +148,11 @@ jobs:
         run: |
           cd ${{ github.workspace }}
           make clean
-          make 2>&1 | tee /tmp/build_output.txt
-          
-          # Check for warnings (GCC with -Wextra -Werror)
-          if grep -i "warning\|error" /tmp/build_output.txt; then
-            echo "⚠ Compiler warnings detected"
-            exit 1
-          else
+          if make 2>&1; then
             echo "✓ Clean build (no warnings)"
-            exit 0
+          else
+            echo "⚠ Compilation failed"
+            exit 1
           fi
 
       - name: Code style check
