@@ -10,7 +10,7 @@ static int write_full(int fd, const void *buf, size_t len) {
     size_t off = 0;
     int retries = 0;
     const int MAX_RETRIES = 10;
-    
+
     while (off < len) {
         ssize_t n = write(fd, (const char*)buf + off, len - off);
         if (n > 0) {
@@ -37,7 +37,7 @@ static int read_full(int fd, void *buf, size_t len) {
     size_t off = 0;
     int retries = 0;
     const int MAX_RETRIES = 5;  // Allow some retries for partial reads
-    
+
     while (off < len) {
         ssize_t n = read(fd, (char*)buf + off, len - off);
         if (n > 0) {
@@ -53,7 +53,7 @@ static int read_full(int fd, void *buf, size_t len) {
             if (errno == EINTR) {
                 continue;  // Retry on interrupt
             }
-            
+
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 if (off == 0) {
                     // No data available at all

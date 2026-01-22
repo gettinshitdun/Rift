@@ -6,7 +6,7 @@
 
 #define FRAME_MAGIC 0x52494654
 #define FRAME_VERSION 1
-#define FRAME_MAX_PAYLOAD 16384 
+#define FRAME_MAX_PAYLOAD 16384
 
 typedef enum {
     FRAME_REGISTER_TUNNEL = 1,

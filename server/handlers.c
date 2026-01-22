@@ -39,7 +39,7 @@ int handle_http_request(int fd, const char *peek_buf) {
     if (custom_hdr) {
         const char *start = strchr(custom_hdr, ':') + 2;
         sscanf(start, "%63s", tunnel_id);
-    } 
+    }
     else {
         char *host_hdr = strstr(peek_buf, "Host: ");
         if (host_hdr) {
@@ -98,14 +98,14 @@ int handle_rift_frame(int fd) {
     // Scenario A: Standard registration from client
     if (type == FRAME_REGISTER_TUNNEL) {
         snprintf(c->tunnel_id, sizeof(c->tunnel_id), "%.*s", (int)len, payload);
-        
+
         // TRANSITION STATE: Move to active tunnel mode
-        c->state = CONN_TUNNEL_READY; 
-        
+        c->state = CONN_TUNNEL_READY;
+
         fprintf(stderr, "[tunnel] Registered: %s (fd=%d)\n", c->tunnel_id, fd);
         return 0;
-    } 
-    
+    }
+
     // Scenario B: Client requesting a bind to an existing service
     if (type == FRAME_CONNECT_REQUEST) {
         char service_id[64] = {0};
@@ -118,6 +118,6 @@ int handle_rift_frame(int fd) {
             return 0;
         }
     }
-    
+
     return -1;
 }

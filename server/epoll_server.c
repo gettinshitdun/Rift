@@ -15,7 +15,7 @@
 #include "include/forward.h"
 #include "include/metrics.h"
 #include "include/frame.h"
-#include "include/handlers.h" 
+#include "include/handlers.h"
 
 #define MAX_EVENTS 64
 
@@ -32,7 +32,7 @@ static void log_info(const char *fmt, ...) {
     struct tm *tm_info = localtime(&now);
     char time_buf[32];
     strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", tm_info);
-    
+
     fprintf(stdout, "[%s] [INFO] ", time_buf);
     va_list args;
     va_start(args, fmt);
@@ -47,7 +47,7 @@ static void log_error(const char *fmt, ...) {
     struct tm *tm_info = localtime(&now);
     char time_buf[32];
     strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", tm_info);
-    
+
     fprintf(stderr, "[%s] [ERROR] ", time_buf);
     va_list args;
     va_start(args, fmt);
@@ -127,7 +127,7 @@ static void handle_new_tunnel(int epfd, int listener_fd) {
 static void handle_initial_frame(int epfd, int fd) {
     char buf[2048];
     ssize_t n = recv(fd, buf, sizeof(buf) - 1, MSG_PEEK);
-    
+
     if (n < 4) {
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
         goto fail;
@@ -137,7 +137,7 @@ static void handle_initial_frame(int epfd, int fd) {
 
     if (memcmp(buf, "RIFT", 4) == 0) {
         if (handle_rift_frame(fd) == 0) return;
-    } 
+    }
     else if (memcmp(buf, "GET ", 4) == 0 || memcmp(buf, "POST", 4) == 0) {
         char full_buf[2048];
         ssize_t total = recv(fd, full_buf, sizeof(full_buf) - 1, 0);
@@ -314,7 +314,7 @@ int epoll_server_main() {
         }
 
         for (int i = 0; i < nfds; i++) {
-            dispatch_event(epfd, events[i].data.fd, events[i].events, 
+            dispatch_event(epfd, events[i].data.fd, events[i].events,
                         tunnel_listener, public_listener, health_listener);
         }
     }
@@ -325,6 +325,6 @@ int epoll_server_main() {
     close(health_listener);
     close(epfd);
     log_info("RIFT server stopped");
-    
+
     return 0;
 }

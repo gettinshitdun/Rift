@@ -33,9 +33,9 @@ int tcp_connect(const char* ip, int port) {
     if (fd < 0) return -1;
     struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons(port) };
     if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) { close(fd); return -1; }
-    
+
     if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { close(fd); return -1; }
-    
+
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     return fd;
@@ -196,13 +196,13 @@ int main(int argc, char *argv[]) {
                         // Process the frame
                         if (type == FRAME_CONNECT_REQUEST) {
                             printf("[*] New connection request\n");
-                            
+
                             // Close existing local connection if any
                             if (local_fd > 0) {
                                 epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
                                 close(local_fd);
                             }
-                            
+
                             // Connect to local service
                             local_fd = tcp_connect("127.0.0.1", local_port);
                             if (local_fd > 0) {
@@ -212,7 +212,7 @@ int main(int argc, char *argv[]) {
                             } else {
                                 perror("[!] Failed to connect to local service");
                             }
-                        } 
+                        }
                         else if (type == FRAME_DATA) {
                             if (local_fd > 0) {
                                 ssize_t written = write(local_fd, payload, len);
@@ -239,7 +239,7 @@ int main(int argc, char *argv[]) {
                             fprintf(stderr, "[!] Unknown frame type: %d\n", type);
                         }
                     }
-                } 
+                }
                 else if (fd == local_fd) {
                     // Read all available data from local service
                     char buffer[FRAME_MAX_PAYLOAD];
