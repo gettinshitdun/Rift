@@ -25,25 +25,40 @@ jobs:
       - name: Build binaries
         run: |
           make clean && make
-          
-          # Create distribution package
+
+      - name: Create distribution packages
+        run: |
+          # Full distribution (with docs)
           mkdir -p rift-dist/bin
           cp rift-server rift-dist/bin/
           cp rift-client rift-dist/bin/
           cp README.md rift-dist/
           cp -r docs/ rift-dist/
-          
-          ls -lh rift-dist/bin/
 
-      - name: Create tarball
+          # Server-only distribution
+          mkdir -p rift-server-dist/bin
+          cp rift-server rift-server-dist/bin/
+          cp README.md rift-server-dist/
+          cp -r docs/ rift-server-dist/
+
+          # Client-only distribution
+          mkdir -p rift-client-dist/bin
+          cp rift-client rift-client-dist/bin/
+          cp README.md rift-client-dist/
+
+      - name: Create tarballs
         run: |
           tar czf rift-${{ matrix.artifact-suffix }}.tar.gz rift-dist/
+          tar czf rift-server-${{ matrix.artifact-suffix }}.tar.gz rift-server-dist/
+          tar czf rift-client-${{ matrix.artifact-suffix }}.tar.gz rift-client-dist/
           ls -lh rift-*.tar.gz
 
-      - name: Create checksum
+      - name: Create checksums
         run: |
           shasum -a 256 rift-${{ matrix.artifact-suffix }}.tar.gz > rift-${{ matrix.artifact-suffix }}.tar.gz.sha256
-          cat rift-${{ matrix.artifact-suffix }}.tar.gz.sha256
+          shasum -a 256 rift-server-${{ matrix.artifact-suffix }}.tar.gz > rift-server-${{ matrix.artifact-suffix }}.tar.gz.sha256
+          shasum -a 256 rift-client-${{ matrix.artifact-suffix }}.tar.gz > rift-client-${{ matrix.artifact-suffix }}.tar.gz.sha256
+          cat rift-*.tar.gz.sha256
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
