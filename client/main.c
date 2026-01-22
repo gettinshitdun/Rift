@@ -14,10 +14,9 @@
 #define SERVER_IP "127.0.0.1"
 #define SERVER_PORT 7000
 
-/* Frame receive buffer to handle partial frames across reads */
 typedef struct {
-    char buf[FRAME_MAX_PAYLOAD + 16];  // 16 bytes for header
-    size_t len;  // bytes currently in buffer
+    char buf[FRAME_MAX_PAYLOAD + 16];
+    size_t len;
 } frame_buffer_t;
 
 static frame_buffer_t frame_buf = {0};
@@ -42,43 +41,36 @@ int tcp_connect(const char* ip, int port) {
     return fd;
 }
 
-/* 
- * Buffered frame reader that handles partial frames across non-blocking reads.
- * Returns 0 on success, -1 if no complete frame is available yet or on error.
- */
-int frame_read_buffered(int fd, frame_type_t *type, char *payload, uint16_t *len) {
-    // Try to read more data into the buffer
+int frame_read_buffered(int fd, frame_type_t *type, char *payload, uint32_t *len) {
     while (frame_buf.len < sizeof(frame_buf.buf)) {
         ssize_t n = read(fd, frame_buf.buf + frame_buf.len, sizeof(frame_buf.buf) - frame_buf.len);
         if (n > 0) {
             frame_buf.len += n;
         } else if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                break;  // No more data available
+                break;
             }
-            // Real error
             return -1;
         } else {
-            // Connection closed
             errno = ECONNRESET;
             return -1;
         }
     }
 
-    // Check if we have at least a frame header (8 bytes)
     if (frame_buf.len < sizeof(frame_header_t)) {
         errno = EAGAIN;
-        return -1;  // Incomplete header
+        return -1;
     }
 
     // Parse the header
     frame_header_t *hdr = (frame_header_t *)frame_buf.buf;
     uint32_t magic = ntohl(hdr->magic);
+    uint8_t version = hdr->version;
     uint16_t h_type = ntohs(hdr->type);
-    uint16_t h_len = ntohs(hdr->length);
+    uint32_t h_len = ntohl(hdr->length);
 
     if (magic != FRAME_MAGIC) {
-        printf("[frame] Magic mismatch: got 0x%08x, expected 0x%08x\n", magic, FRAME_MAGIC);
+        fprintf(stderr, "[frame] Magic mismatch: got 0x%08x, expected 0x%08x\n", magic, FRAME_MAGIC);
         // Corrupted frame - try to skip a byte and resync
         memmove(frame_buf.buf, frame_buf.buf + 1, frame_buf.len - 1);
         frame_buf.len--;
@@ -86,8 +78,14 @@ int frame_read_buffered(int fd, frame_type_t *type, char *payload, uint16_t *len
         return -1;
     }
 
+    if (version != FRAME_VERSION) {
+        fprintf(stderr, "[frame] Unsupported version: %d (expected %d)\n", version, FRAME_VERSION);
+        errno = EPROTO;
+        return -1;
+    }
+
     if (h_len > FRAME_MAX_PAYLOAD) {
-        printf("[frame] Payload too large: %d\n", h_len);
+        fprintf(stderr, "[frame] Payload too large: %u\n", h_len);
         errno = EMSGSIZE;
         return -1;
     }
@@ -120,10 +118,15 @@ int main(int argc, char *argv[]) {
     }
 
     int local_port = atoi(argv[2]);
+    if (local_port <= 0 || local_port > 65535) {
+        fprintf(stderr, "Error: Invalid port %d\n", local_port);
+        return 1;
+    }
+
     char tunnel_id[64];
     generate_random_id(tunnel_id, sizeof(tunnel_id));
 
-    printf("\n--- RIFT CLIENT ---\n");
+    printf("\n--- RIFT CLIENT v1 ---\n");
     printf("Forwarding: localhost:%d <---> Rift Server\n", local_port);
     printf("Tunnel ID:  %s\n", tunnel_id);
     printf("-------------------\n\n");
@@ -134,13 +137,20 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (frame_write(server_fd, FRAME_REGISTER_TUNNEL, tunnel_id, (uint16_t)strlen(tunnel_id)) < 0) {
+    if (frame_write(server_fd, FRAME_REGISTER_TUNNEL, tunnel_id, (uint32_t)strlen(tunnel_id)) < 0) {
         fprintf(stderr, "Failed to send registration frame\n");
+        close(server_fd);
         return 1;
     }
 
     int local_fd = -1;
     int epfd = epoll_create1(0);
+    if (epfd < 0) {
+        perror("epoll_create1");
+        close(server_fd);
+        return 1;
+    }
+
     struct epoll_event ev, events[MAX_EVENTS];
 
     ev.events = EPOLLIN;
@@ -153,6 +163,7 @@ int main(int argc, char *argv[]) {
         int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
         if (nfds < 0) {
             if (errno == EINTR) continue;
+            perror("epoll_wait");
             break;
         }
 
@@ -167,15 +178,15 @@ int main(int argc, char *argv[]) {
                     while (1) {
                         frame_type_t type;
                         char payload[FRAME_MAX_PAYLOAD];
-                        uint16_t len;
+                        uint32_t len;
 
                         int res = frame_read_buffered(server_fd, &type, payload, &len);
                         if (res < 0) {
-                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                                if (frames_read == 0) {
-                                    printf("[DEBUG] EPOLLIN on server_fd but no complete frame yet\n");
+                            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EPROTO || errno == EBADMSG) {
+                                if (frames_read == 0 && errno == EAGAIN) {
+                                    // Normal condition - just no data available
                                 }
-                                break; // No more complete frames, exit inner loop
+                                break; // No more complete frames
                             }
                             fprintf(stderr, "[!] Server connection error: %s\n", strerror(errno));
                             goto cleanup;
@@ -206,13 +217,26 @@ int main(int argc, char *argv[]) {
                             if (local_fd > 0) {
                                 ssize_t written = write(local_fd, payload, len);
                                 if (written < 0) {
-                                    perror("[!] Write to local service failed");
-                                } else if (written != len) {
-                                    fprintf(stderr, "[!] Partial write: %ld/%d bytes\n", written, len);
+                                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                                        perror("[!] Write to local service failed");
+                                    }
+                                } else if (written != (ssize_t)len) {
+                                    fprintf(stderr, "[!] Partial write: %ld/%u bytes\n", written, len);
                                 }
                             } else {
-                                printf("[!] Dropped %d bytes (no local connection)\n", len);
+                                printf("[!] Dropped %u bytes (no local connection)\n", len);
                             }
+                        }
+                        else if (type == FRAME_CLOSE) {
+                            if (local_fd > 0) {
+                                printf("[*] Local connection closed\n");
+                                epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
+                                close(local_fd);
+                                local_fd = -1;
+                            }
+                        }
+                        else {
+                            fprintf(stderr, "[!] Unknown frame type: %d\n", type);
                         }
                     }
                 } 
@@ -222,9 +246,9 @@ int main(int argc, char *argv[]) {
                     while (1) {
                         ssize_t n = read(local_fd, buffer, sizeof(buffer));
                         if (n > 0) {
-                            printf("[*] Forwarding %ld bytes to server\n", n);
-                            if (frame_write(server_fd, FRAME_DATA, buffer, (uint16_t)n) < 0) {
-                                fprintf(stderr, "[!] Failed to send to server\n");
+                            if (frame_write(server_fd, FRAME_DATA, buffer, (uint32_t)n) < 0) {
+                                fprintf(stderr, "[!] Failed to send to server: %s\n", strerror(errno));
+                                goto cleanup;
                             }
                         } else if (n < 0) {
                             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -233,8 +257,11 @@ int main(int argc, char *argv[]) {
                             perror("[!] Read error from local service");
                             break;
                         } else {
-                            // Connection closed
+                            // Connection closed - send FRAME_CLOSE to notify server
                             printf("[*] Local service closed connection\n");
+                            if (frame_write(server_fd, FRAME_CLOSE, NULL, 0) < 0) {
+                                fprintf(stderr, "[!] Failed to notify server of close: %s\n", strerror(errno));
+                            }
                             epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
                             close(local_fd);
                             local_fd = -1;

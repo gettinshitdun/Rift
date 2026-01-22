@@ -1,2 +1,5 @@
 .idea
 *.o
+rift-client
+rift-server
+build/

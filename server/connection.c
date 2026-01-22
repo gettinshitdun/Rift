@@ -1,7 +1,9 @@
 #include "include/connection.h"
+#include "include/frame.h"
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <errno.h>
 #include <sys/epoll.h>
 
 static connection_t connections[MAX_CONNECTIONS];
@@ -55,18 +57,10 @@ void connection_bind(int browser_fd, int tunnel_fd) {
     connection_t *t = connection_get(tunnel_fd);
     if (!b || !t) return;
 
-    // Link them together
     b->peer_fd = tunnel_fd;
     t->peer_fd = browser_fd;
-
-    // The Browser FD is now purely for forwarding raw bytes
     b->state = CONN_PUBLIC_FORWARDING;
-
-    // The Tunnel FD stays in TUNNEL_READY to keep processing RIFT frames.
-    // We only update it if it wasn't already ready.
-    if (t->state != CONN_TUNNEL_READY) {
-        t->state = CONN_TUNNEL_READY;
-    }
+    t->state = CONN_TUNNEL_FORWARDING;
 }
 
 void connection_close(int epfd, int fd) {
@@ -90,23 +84,27 @@ void connection_close(int epfd, int fd) {
         connection_t *p = connection_get(peer);
         if (p && p->peer_fd == fd) {
             p->peer_fd = 0;
-
-            /*
-             * If we closed a tunnel that was actively paired, close the peer
-             * (the browser/public connection). However, if we closed the
-             * public connection, we should NOT tear down the tunnel; instead
-             * leave it in READY state so the client stays connected for
-             * subsequent requests.
-             */
-            if (orig_state == CONN_TUNNEL_READY) {
+            if (orig_state == CONN_TUNNEL_READY || orig_state == CONN_TUNNEL_FORWARDING) {
                 connection_close(epfd, peer);
-            } else {
-                /* Ensure the tunnel stays available for future binds */
-                if (p->state != CONN_TUNNEL_READY) {
-                    p->state = CONN_TUNNEL_READY;
+            } else if (orig_state == CONN_PUBLIC_INIT || orig_state == CONN_PUBLIC_FORWARDING) {
+                if (frame_write(peer, FRAME_CLOSE, NULL, 0) < 0) {
+                    fprintf(stderr, "[connection] Failed to send FRAME_CLOSE to tunnel (fd=%d): %s\n", peer, strerror(errno));
                 }
+                p->state = CONN_TUNNEL_READY;
             }
         }
+    }
+}
+
+void connection_reset_public(int fd) {
+    connection_t *c = connection_get(fd);
+    if (!c || c->fd == 0) return;
+
+    if (c->state == CONN_PUBLIC_FORWARDING) {
+        c->peer_fd = 0;
+        c->state = CONN_PUBLIC_INIT;
+        c->service_id[0] = '\0';
+        fprintf(stderr, "[connection] Reset public connection (fd=%d) back to INIT state for next request\n", fd);
     }
 }
 

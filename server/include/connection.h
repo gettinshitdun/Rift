@@ -44,6 +44,12 @@ typedef enum {
      */
     CONN_TUNNEL_READY,
 
+    /*
+     * Tunnel is actively paired with a public connection
+     * and forwarding data bidirectionally.
+     */
+    CONN_TUNNEL_FORWARDING,
+
     /* --------------------------------------------------------
      * Public lifecycle (external user → server connection)
      * --------------------------------------------------------
@@ -134,9 +140,16 @@ connection_t* connection_get(int fd);
  */
 void connection_bind(int fd1, int fd2);
 
-
+/*
+ * Completely close a connection, cleanup both sides.
+ */
 void connection_close(int epfd, int fd);
 
+/*
+ * Reset a public connection back to INIT state after local service closes.
+ * Allows browser to send another request on same Keep-Alive connection.
+ */
+void connection_reset_public(int fd);
 
 int connection_active_count(void);
 

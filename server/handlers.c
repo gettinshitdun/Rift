@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include "include/handlers.h"
 #include "include/connection.h"
 #include "include/frame.h"
@@ -31,12 +32,14 @@ void send_http_error(int fd, const char *status, const char *msg) {
 int handle_http_request(int fd, const char *peek_buf) {
     char tunnel_id[64] = {0};
 
-    // 1. Try to find custom header X-Tunnel-Id
-    char *custom_hdr = strstr(peek_buf, "X-Tunnel-Id: ");
+    char *custom_hdr = strstr(peek_buf, "x-tunnel-id: ");
+    if (!custom_hdr) {
+        custom_hdr = strstr(peek_buf, "X-Tunnel-Id: ");
+    }
     if (custom_hdr) {
-        sscanf(custom_hdr + 13, "%63s", tunnel_id);
+        const char *start = strchr(custom_hdr, ':') + 2;
+        sscanf(start, "%63s", tunnel_id);
     } 
-    // 2. Fallback: Parse Host header
     else {
         char *host_hdr = strstr(peek_buf, "Host: ");
         if (host_hdr) {
@@ -47,25 +50,31 @@ int handle_http_request(int fd, const char *peek_buf) {
     if (tunnel_id[0] != '\0') {
         connection_t *tunnel = connection_find_tunnel(tunnel_id);
         if (tunnel) {
-            // Link the browser connection to the tunnel connection
             connection_bind(fd, tunnel->fd);
 
-
-            // STEP 1: Alert the Rift Client that a new request is starting
-            // (Optional but good for client-side logging)
-            frame_write(tunnel->fd, FRAME_CONNECT_REQUEST, "NEW_CONN", 8);
-
-            // STEP 2: FORWARD THE STOLEN BUFFER
-            // Because 'peek_buf' was already read from the socket, the main loop 
-            // won't see it. We must manually wrap it and send it now.
-            if (frame_write(tunnel->fd, FRAME_DATA, peek_buf, strlen(peek_buf)) < 0) {
-                printf("[http] Failed to forward initial request to tunnel\n");
+            if (frame_write(tunnel->fd, FRAME_CONNECT_REQUEST, "NEW", 3) < 0) {
+                fprintf(stderr, "[http] Failed to write FRAME_CONNECT_REQUEST: %s\n", strerror(errno));
                 return -1;
             }
 
-            printf("[http] Linked Browser(fd=%d) to Tunnel(%s) and forwarded header\n", fd, tunnel_id);
+            size_t hdr_len = strlen(peek_buf);
+            if (hdr_len > FRAME_MAX_PAYLOAD) {
+                fprintf(stderr, "[http] HTTP request too large: %zu bytes (max %u)\n", hdr_len, FRAME_MAX_PAYLOAD);
+                return -1;
+            }
+
+            if (frame_write(tunnel->fd, FRAME_DATA, peek_buf, (uint32_t)hdr_len) < 0) {
+                fprintf(stderr, "[http] Failed to forward initial request to tunnel: %s\n", strerror(errno));
+                return -1;
+            }
+
+            fprintf(stderr, "[http] Linked Browser(fd=%d) to Tunnel(%s), sent %zu bytes\n", fd, tunnel_id, hdr_len);
             return 0;
+        } else {
+            fprintf(stderr, "[http] Tunnel not found: %s\n", tunnel_id);
         }
+    } else {
+        fprintf(stderr, "[http] No tunnel ID in request\n");
     }
 
     send_http_error(fd, "404 Not Found", "No Tunnel Specified or Found\n");
@@ -78,9 +87,9 @@ int handle_http_request(int fd, const char *peek_buf) {
 int handle_rift_frame(int fd) {
     frame_type_t type;
     char payload[FRAME_MAX_PAYLOAD + 1];
-    uint16_t len;
+    uint32_t len;
 
-    // frame_read handles the binary header (8 bytes) and consumes it from the socket
+    // frame_read handles the binary header (12 bytes) and consumes it from the socket
     if (frame_read(fd, &type, payload, &len) < 0) return -1;
 
     connection_t *c = connection_get(fd);
@@ -88,24 +97,24 @@ int handle_rift_frame(int fd) {
 
     // Scenario A: Standard registration from client
     if (type == FRAME_REGISTER_TUNNEL) {
-        snprintf(c->tunnel_id, sizeof(c->tunnel_id), "%.*s", len, payload);
+        snprintf(c->tunnel_id, sizeof(c->tunnel_id), "%.*s", (int)len, payload);
         
         // TRANSITION STATE: Move to active tunnel mode
         c->state = CONN_TUNNEL_READY; 
         
-        printf("[tunnel] Registered: %s (fd=%d)\n", c->tunnel_id, fd);
+        fprintf(stderr, "[tunnel] Registered: %s (fd=%d)\n", c->tunnel_id, fd);
         return 0;
     } 
     
     // Scenario B: Client requesting a bind to an existing service
     if (type == FRAME_CONNECT_REQUEST) {
         char service_id[64] = {0};
-        snprintf(service_id, sizeof(service_id), "%.*s", len, payload);
+        snprintf(service_id, sizeof(service_id), "%.*s", (int)len, payload);
         connection_t *tunnel = connection_find_tunnel(service_id);
         if (tunnel) {
             connection_bind(fd, tunnel->fd);
             c->state = CONN_TUNNEL_READY;
-            printf("[bind] Internal request: %d -> %d (%s)\n", fd, tunnel->fd, service_id);
+            fprintf(stderr, "[bind] Internal request: %d -> %d (%s)\n", fd, tunnel->fd, service_id);
             return 0;
         }
     }
