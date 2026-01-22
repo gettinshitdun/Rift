@@ -7,16 +7,16 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Note: Currently builds for Linux only (uses epoll, not portable to macOS/kqueue)
+  # TODO: Add cross-platform support with conditional compilation for kqueue
   build-matrix:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         include:
           - os: ubuntu-latest
             artifact-suffix: linux-x86_64
-          - os: macos-latest
-            artifact-suffix: macos-x86_64
 
     steps:
       - name: Checkout code
