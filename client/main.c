@@ -161,13 +161,11 @@ int main(int argc, char *argv[]) {
     generate_random_id(tunnel_id, sizeof(tunnel_id));
 
     printf("\n--- RIFT CLIENT v1 ---\n");
-    printf("Forwarding: localhost:%d <---> Rift Server (%s:%d)\n", local_port, server_ip, server_port);
+    printf("Forwarding: localhost:%d <---> Rift Server\n", local_port);
     printf("Tunnel ID:  %s\n", tunnel_id);
     printf("\n📡 Public URLs:\n");
-    printf("   http://%s.rift.local\n", tunnel_id);
-    printf("   https://%s.rift.local\n", tunnel_id);
-    printf("\n💡 Using direct server IP:\n");
-    printf("   curl -H 'Host: %s.rift.local' http://%s\n", tunnel_id, server_ip);
+    printf("   http://%s.rift.kanishakmittal.site\n", tunnel_id);
+    printf("   https://%s.rift.kanishakmittal.site\n", tunnel_id);
     printf("-------------------\n\n");
 
     int server_fd = tcp_connect(server_ip, server_port);
