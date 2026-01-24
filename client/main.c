@@ -8,6 +8,7 @@
 #include <time.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <sys/random.h>
 
 #include "../server/include/frame.h"
 
@@ -23,10 +24,20 @@ typedef struct {
 static frame_buffer_t frame_buf = {0};
 
 void generate_random_id(char *buf, size_t len) {
-    const char *adj[] = {"bold", "swift", "calm", "fiery", "dark", "neon"};
-    const char *noun[] = {"beast", "wave", "peak", "coder", "rift", "bolt"};
-    srand(time(NULL) ^ getpid());
-    snprintf(buf, len, "%s-%s-%d", adj[rand() % 6], noun[rand() % 6], rand() % 100);
+    const char *adj[] = {"bold", "swift", "calm", "fiery", "dark", "neon", "silver", "golden", "arctic", "cosmic"};
+    const char *noun[] = {"beast", "wave", "peak", "coder", "rift", "bolt", "phoenix", "dragon", "titan", "sage"};
+    
+    unsigned int rand_val = 0;
+    ssize_t ret = getrandom(&rand_val, sizeof(rand_val), GRND_NONBLOCK);
+    if (ret <= 0) {
+        srand((unsigned int)(time(NULL) ^ getpid()));
+        rand_val = rand();
+    }
+    
+    time_t now = time(NULL);
+    unsigned int ts_hash = (unsigned int)now ^ getpid() ^ rand_val;
+    
+    snprintf(buf, len, "%s-%s-%x", adj[rand_val % 10], noun[(rand_val >> 16) % 10], ts_hash & 0xFFFFFF);
 }
 
 int tcp_connect(const char* ip, int port) {
@@ -152,6 +163,11 @@ int main(int argc, char *argv[]) {
     printf("\n--- RIFT CLIENT v1 ---\n");
     printf("Forwarding: localhost:%d <---> Rift Server (%s:%d)\n", local_port, server_ip, server_port);
     printf("Tunnel ID:  %s\n", tunnel_id);
+    printf("\n📡 Public URLs:\n");
+    printf("   http://%s.rift.local\n", tunnel_id);
+    printf("   https://%s.rift.local\n", tunnel_id);
+    printf("\n💡 Using direct server IP:\n");
+    printf("   curl -H 'Host: %s.rift.local' http://%s\n", tunnel_id, server_ip);
     printf("-------------------\n\n");
 
     int server_fd = tcp_connect(server_ip, server_port);
