@@ -180,8 +180,6 @@ int main(int argc, char *argv[]) {
     ev.data.fd = server_fd;
     epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &ev);
 
-    printf("[*] Tunnel active. Waiting for traffic...\n");
-
     while (1) {
         int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
         if (nfds < 0) {
@@ -218,8 +216,6 @@ int main(int argc, char *argv[]) {
 
                         // Process the frame
                         if (type == FRAME_CONNECT_REQUEST) {
-                            printf("[*] New connection request\n");
-
                             // Close existing local connection if any
                             if (local_fd > 0) {
                                 epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
@@ -231,7 +227,6 @@ int main(int argc, char *argv[]) {
                             if (local_fd > 0) {
                                 struct epoll_event lev = {.events = EPOLLIN, .data.fd = local_fd};
                                 epoll_ctl(epfd, EPOLL_CTL_ADD, local_fd, &lev);
-                                printf("[*] Connected to localhost:%d\n", local_port);
                             } else {
                                 perror("[!] Failed to connect to local service");
                             }
@@ -281,7 +276,6 @@ int main(int argc, char *argv[]) {
                             break;
                         } else {
                             // Connection closed - send FRAME_CLOSE to notify server
-                            printf("[*] Local service closed connection\n");
                             if (frame_write(server_fd, FRAME_CLOSE, NULL, 0) < 0) {
                                 fprintf(stderr, "[!] Failed to notify server of close: %s\n", strerror(errno));
                             }
