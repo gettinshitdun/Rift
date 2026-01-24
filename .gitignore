@@ -5,4 +5,5 @@ rift-server
 build/
 deploy.sh
 setup-server.sh
+setup-iptables.sh
 rift-server.service
