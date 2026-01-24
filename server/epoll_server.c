@@ -126,19 +126,30 @@ static void handle_new_tunnel(int epfd, int listener_fd) {
 
 static void handle_initial_frame(int epfd, int fd) {
     char buf[2048];
+    fprintf(stderr, "[DEBUG] handle_initial_frame called for fd=%d\n", fd);
+    
     ssize_t n = recv(fd, buf, sizeof(buf) - 1, MSG_PEEK);
+    fprintf(stderr, "[DEBUG] recv peeked %zd bytes\n", n);
 
     if (n < 4) {
+        fprintf(stderr, "[DEBUG] n < 4, closing connection\n");
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
         goto fail;
     }
 
     buf[n] = '\0';
+    fprintf(stderr, "[DEBUG] Peeked data: %.4s\n", buf);
 
     if (memcmp(buf, "RIFT", 4) == 0) {
-        if (handle_rift_frame(fd) == 0) return;
+        fprintf(stderr, "[DEBUG] Found RIFT header, calling handle_rift_frame\n");
+        if (handle_rift_frame(fd) == 0) {
+            fprintf(stderr, "[DEBUG] handle_rift_frame returned 0, returning\n");
+            return;
+        }
+        fprintf(stderr, "[DEBUG] handle_rift_frame returned non-zero, going to fail\n");
     }
     else if (memcmp(buf, "GET ", 4) == 0 || memcmp(buf, "POST", 4) == 0) {
+        fprintf(stderr, "[DEBUG] Found HTTP header\n");
         char full_buf[2048];
         ssize_t total = recv(fd, full_buf, sizeof(full_buf) - 1, 0);
         if (total > 0) {
@@ -146,8 +157,12 @@ static void handle_initial_frame(int epfd, int fd) {
             if (handle_http_request(fd, full_buf) == 0) return;
         }
     }
+    else {
+        fprintf(stderr, "[DEBUG] Unknown header: %.4s\n", buf);
+    }
 
 fail:
+    fprintf(stderr, "[DEBUG] Closing connection due to failure\n");
     connection_close(epfd, fd);
 }
 

@@ -17,7 +17,7 @@ fi
 
 cd /home/ubuntu/rift
 git fetch origin
-git checkout v1.0.0
+git checkout KM/25/refactor
 make clean && make
 sudo cp /home/ubuntu/rift/rift-server /usr/local/bin/rift-server
 sudo systemctl restart rift-server
