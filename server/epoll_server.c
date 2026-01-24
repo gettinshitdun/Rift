@@ -265,18 +265,25 @@ static void handle_connection_event(int epfd, int fd) {
 /* ------------------------- Event dispatcher ------------------------- */
 
 static void dispatch_event(int epfd, int fd, uint32_t events, int t_lsnr, int p_lsnr, int h_lsnr) {
+    fprintf(stderr, "[DEBUG] dispatch_event: fd=%d, events=0x%x, t_lsnr=%d, p_lsnr=%d\n", fd, events, t_lsnr, p_lsnr);
+    
     if (events & (EPOLLHUP | EPOLLERR)) {
+        fprintf(stderr, "[DEBUG] HUP or ERR event, closing\n");
         connection_close(epfd, fd);
         return;
     }
 
     if (fd == h_lsnr) {
+        fprintf(stderr, "[DEBUG] Health listener event\n");
         handle_health_request(fd);
     } else if (fd == t_lsnr) {
+        fprintf(stderr, "[DEBUG] Tunnel listener event\n");
         handle_new_tunnel(epfd, fd);
     } else if (fd == p_lsnr) {
+        fprintf(stderr, "[DEBUG] Public listener event\n");
         handle_new_public(epfd, fd);
     } else {
+        fprintf(stderr, "[DEBUG] Connection event for fd=%d\n", fd);
         handle_connection_event(epfd, fd);
     }
 }
