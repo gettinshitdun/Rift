@@ -7,12 +7,13 @@
 #include <errno.h>
 #include <time.h>
 #include <fcntl.h>
+#include <netdb.h>
 
 #include "../server/include/frame.h"
 
 #define MAX_EVENTS 10
-#define SERVER_IP "127.0.0.1"
-#define SERVER_PORT 7000
+#define DEFAULT_SERVER_IP "43.205.120.186"
+#define DEFAULT_SERVER_PORT 7000
 
 typedef struct {
     char buf[FRAME_MAX_PAYLOAD + 16];
@@ -31,8 +32,19 @@ void generate_random_id(char *buf, size_t len) {
 int tcp_connect(const char* ip, int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
+    
     struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons(port) };
-    if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) { close(fd); return -1; }
+    
+    // Try direct IP first
+    if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
+        // Not an IP, try DNS resolution
+        struct hostent *host = gethostbyname(ip);
+        if (!host) {
+            close(fd);
+            return -1;
+        }
+        memcpy(&addr.sin_addr, host->h_addr, host->h_length);
+    }
 
     if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { close(fd); return -1; }
 
@@ -123,15 +135,26 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Allow server address override via environment variable for testing
+    const char *server_ip = getenv("RIFT_SERVER_IP");
+    if (!server_ip) {
+        server_ip = DEFAULT_SERVER_IP;
+    }
+    int server_port = DEFAULT_SERVER_PORT;
+    const char *server_port_env = getenv("RIFT_SERVER_PORT");
+    if (server_port_env) {
+        server_port = atoi(server_port_env);
+    }
+
     char tunnel_id[64];
     generate_random_id(tunnel_id, sizeof(tunnel_id));
 
     printf("\n--- RIFT CLIENT v1 ---\n");
-    printf("Forwarding: localhost:%d <---> Rift Server\n", local_port);
+    printf("Forwarding: localhost:%d <---> Rift Server (%s:%d)\n", local_port, server_ip, server_port);
     printf("Tunnel ID:  %s\n", tunnel_id);
     printf("-------------------\n\n");
 
-    int server_fd = tcp_connect(SERVER_IP, SERVER_PORT);
+    int server_fd = tcp_connect(server_ip, server_port);
     if (server_fd < 0) {
         perror("Error: Could not connect to Rift Server");
         return 1;

@@ -1,0 +1,89 @@
+Starting Rift server...
+[2026-01-25 01:51:52] [INFO] RIFT server started
+[2026-01-25 01:51:52] [INFO]   tunnel listener : 7000
+[2026-01-25 01:51:52] [INFO]   public listener : 9000
+[2026-01-25 01:51:52] [INFO]   health endpoint : 8080
+[tunnel] Registered: test-tunnel-1 (fd=7)
+[tunnel] Registered: test-tunnel-1 (fd=7)
+[tunnel] Registered: test-tunnel-1 (fd=7)
+[tunnel] Failed to send tunnel assignment: Broken pipe
+[tunnel] Registered: test-tunnel-2 (fd=7)
+[http] Linked Browser(fd=8) to Tunnel(test-tunnel-2), sent 65 bytes
+[2026-01-25 01:52:41] [ERROR] Failed to read frame from tunnel: Connection reset by peer
+[tunnel] Registered: test-tunnel-3 (fd=7)
+[http] Linked Browser(fd=8) to Tunnel(test-tunnel-3), sent 65 bytes
+[http] Linked Browser(fd=8) to Tunnel(test-tunnel-3), sent 65 bytes
+[http] Linked Browser(fd=8) to Tunnel(test-tunnel-3), sent 65 bytes
+[tunnel] Registered: test-tunnel-4a (fd=7)
+[tunnel] Registered: test-tunnel-4b (fd=8)
+[http] Linked Browser(fd=9) to Tunnel(test-tunnel-4a), sent 66 bytes
+[http] Linked Browser(fd=10) to Tunnel(test-tunnel-4b), sent 66 bytes
+[2026-01-25 01:53:08] [ERROR] Failed to read frame from tunnel: Connection reset by peer
+[2026-01-25 01:53:08] [ERROR] Failed to read frame from tunnel: Connection reset by peer
+[tunnel] Registered: test-tunnel-5 (fd=7)
+[http] Linked Browser(fd=8) to Tunnel(test-tunnel-5), sent 65 bytes
+[http] Linked Browser(fd=8) to Tunnel(test-tunnel-5), sent 65 bytes
+[2026-01-25 01:53:14] [ERROR] Failed to read frame from tunnel: Connection reset by peer
+[tunnel] Registered: test-tunnel-6 (fd=7)
+[http] Linked Browser(fd=8) to Tunnel(test-tunnel-6), sent 69 bytes
+[2026-01-25 01:53:14] [ERROR] Failed to read frame from tunnel: Connection reset by peer
+[tunnel] Registered: test-tunnel-1 (fd=7)
+[tunnel] Registered: test-tunnel-2 (fd=7)
+[http] Linked Browser(fd=8) to Tunnel(test-tunnel-2), sent 65 bytes
+[2026-01-25 01:53:54] [ERROR] Failed to read frame from tunnel: Connection reset by peer
+[tunnel] Registered: test-tunnel-3 (fd=7)
+[http] Linked Browser(fd=8) to Tunnel(test-tunnel-3), sent 65 bytes
+[http] Linked Browser(fd=8) to Tunnel(test-tunnel-3), sent 65 bytes
+[http] Linked Browser(fd=8) to Tunnel(test-tunnel-3), sent 65 bytes
+[tunnel] Registered: test-tunnel-4a (fd=7)
+[tunnel] Registered: test-tunnel-4b (fd=8)
+[http] Linked Browser(fd=9) to Tunnel(test-tunnel-4a), sent 66 bytes
+[http] Linked Browser(fd=10) to Tunnel(test-tunnel-4b), sent 66 bytes
+[2026-01-25 01:54:21] [ERROR] Failed to read frame from tunnel: Connection reset by peer
+[2026-01-25 01:54:21] [ERROR] Failed to read frame from tunnel: Connection reset by peer
+[tunnel] Registered: test-tunnel-5 (fd=7)
+[http] Linked Browser(fd=8) to Tunnel(test-tunnel-5), sent 65 bytes
+[http] Linked Browser(fd=8) to Tunnel(test-tunnel-5), sent 65 bytes
+[2026-01-25 01:54:27] [ERROR] Failed to read frame from tunnel: Connection reset by peer
+[tunnel] Registered: test-tunnel-6 (fd=7)
+[http] Linked Browser(fd=8) to Tunnel(test-tunnel-6), sent 69 bytes
+[2026-01-25 01:54:27] [ERROR] Failed to read frame from tunnel: Connection reset by peer
+[tunnel] Registered: swift-wave-67 (fd=7)
+[server] tunnel connected fd=7
+[server] tunnel connected fd=7
+[server] tunnel connected fd=7
+[server] tunnel connected fd=7
+[server] tunnel connected fd=7
+[server] public connected fd=8
+[server] tunnel connected fd=7
+[server] public connected fd=8
+[server] public connected fd=8
+[server] public connected fd=8
+[server] tunnel connected fd=7
+[server] tunnel connected fd=8
+[server] public connected fd=9
+[server] public connected fd=10
+[server] tunnel connected fd=7
+[server] public connected fd=8
+[server] public connected fd=8
+[server] tunnel connected fd=7
+[server] public connected fd=8
+[server] tunnel connected fd=7
+[server] tunnel connected fd=7
+[server] public connected fd=8
+[server] tunnel connected fd=7
+[server] public connected fd=8
+[server] public connected fd=8
+[server] public connected fd=8
+[server] tunnel connected fd=7
+[server] tunnel connected fd=8
+[server] public connected fd=9
+[server] public connected fd=10
+[server] tunnel connected fd=7
+[server] public connected fd=8
+[server] public connected fd=8
+[server] tunnel connected fd=7
+[server] public connected fd=8
+[server] tunnel connected fd=7
+[2026-01-25 01:57:04] [INFO] Shutting down gracefully...
+[2026-01-25 01:57:04] [INFO] RIFT server stopped
