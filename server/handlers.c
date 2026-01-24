@@ -89,21 +89,11 @@ int handle_rift_frame(int fd) {
     char payload[FRAME_MAX_PAYLOAD + 1];
     uint32_t len;
 
-    fprintf(stderr, "[DEBUG] handle_rift_frame called for fd=%d\n", fd);
-
     // frame_read handles the binary header (12 bytes) and consumes it from the socket
-    if (frame_read(fd, &type, payload, &len) < 0) {
-        fprintf(stderr, "[DEBUG] frame_read failed: %s\n", strerror(errno));
-        return -1;
-    }
-
-    fprintf(stderr, "[DEBUG] frame_read succeeded, type=%d, len=%u\n", type, len);
+    if (frame_read(fd, &type, payload, &len) < 0) return -1;
 
     connection_t *c = connection_get(fd);
-    if (!c) {
-        fprintf(stderr, "[DEBUG] connection_get failed\n");
-        return -1;
-    }
+    if (!c) return -1;
 
     // Scenario A: Standard registration from client
     if (type == FRAME_REGISTER_TUNNEL) {
@@ -113,7 +103,6 @@ int handle_rift_frame(int fd) {
         c->state = CONN_TUNNEL_READY;
 
         fprintf(stderr, "[tunnel] Registered: %s (fd=%d)\n", c->tunnel_id, fd);
-        fprintf(stderr, "[DEBUG] Returning 0 from handle_rift_frame\n");
         return 0;
     }
 
@@ -130,6 +119,5 @@ int handle_rift_frame(int fd) {
         }
     }
 
-    fprintf(stderr, "[DEBUG] Unrecognized frame type, returning -1\n");
     return -1;
 }

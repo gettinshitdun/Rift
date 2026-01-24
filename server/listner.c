@@ -116,7 +116,6 @@ int listener_create(int port) {
 int listener_accept(int listener_fd) {
     while (1) {
         int client_fd = accept(listener_fd, NULL, NULL);
-        fprintf(stderr, "[DEBUG] accept() returned fd=%d (errno=%d)\n", client_fd, errno);
         if (client_fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 return -1;  // no more clients to accept
@@ -130,7 +129,6 @@ int listener_accept(int listener_fd) {
             return -1;
         }
 
-        fprintf(stderr, "[DEBUG] Accepted client fd=%d\n", client_fd);
         return client_fd;
     }
 }

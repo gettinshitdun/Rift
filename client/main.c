@@ -161,7 +161,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (frame_write(server_fd, FRAME_REGISTER_TUNNEL, tunnel_id, (uint32_t)strlen(tunnel_id)) < 0) {
-        fprintf(stderr, "Failed to send registration frame\n");
+        perror("Error: Failed to send registration frame");
         close(server_fd);
         return 1;
     }
