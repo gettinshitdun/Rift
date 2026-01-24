@@ -136,7 +136,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (frame_write(server_fd, FRAME_REGISTER_TUNNEL, tunnel_id, (uint32_t)strlen(tunnel_id)) < 0) {
+    // Send empty payload to let server generate tunnel ID
+    if (frame_write(server_fd, FRAME_REGISTER_TUNNEL, "", 0) < 0) {
         fprintf(stderr, "Failed to send registration frame\n");
         close(server_fd);
         return 1;
@@ -159,7 +160,7 @@ int main(int argc, char *argv[]) {
         
         if (type == FRAME_TUNNEL_READY) {
             snprintf(assigned_tunnel_id, sizeof(assigned_tunnel_id), "%.*s", (int)len, payload);
-            printf("[+] Tunnel assigned: %s.domain.site\n", assigned_tunnel_id);
+            printf("[+] Tunnel assigned: %s.rift.kanishakmittal.site\n", assigned_tunnel_id);
             printf("    Local service:   localhost:%d\n", local_port);
             printf("\n[*] Tunnel active. Waiting for traffic...\n");
             break;
