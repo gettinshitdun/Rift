@@ -128,7 +128,6 @@ int main(int argc, char *argv[]) {
 
     printf("\n--- RIFT CLIENT v1 ---\n");
     printf("Forwarding: localhost:%d <---> Rift Server\n", local_port);
-    printf("Tunnel ID:  %s\n", tunnel_id);
     printf("-------------------\n\n");
 
     int server_fd = tcp_connect(SERVER_IP, SERVER_PORT);
@@ -141,6 +140,30 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Failed to send registration frame\n");
         close(server_fd);
         return 1;
+    }
+
+    // Wait to receive the assigned tunnel ID from server
+    printf("[*] Waiting for tunnel assignment from server...\n");
+    char assigned_tunnel_id[64] = {0};
+    while (1) {
+        frame_type_t type;
+        char payload[FRAME_MAX_PAYLOAD];
+        uint32_t len;
+        int res = frame_read_buffered(server_fd, &type, payload, &len);
+        if (res < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            fprintf(stderr, "[!] Error waiting for tunnel assignment: %s\n", strerror(errno));
+            close(server_fd);
+            return 1;
+        }
+        
+        if (type == FRAME_TUNNEL_READY) {
+            snprintf(assigned_tunnel_id, sizeof(assigned_tunnel_id), "%.*s", (int)len, payload);
+            printf("[+] Tunnel assigned: %s.domain.site\n", assigned_tunnel_id);
+            printf("    Local service:   localhost:%d\n", local_port);
+            printf("\n[*] Tunnel active. Waiting for traffic...\n");
+            break;
+        }
     }
 
     int local_fd = -1;
@@ -156,8 +179,6 @@ int main(int argc, char *argv[]) {
     ev.events = EPOLLIN;
     ev.data.fd = server_fd;
     epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &ev);
-
-    printf("[*] Tunnel active. Waiting for traffic...\n");
 
     while (1) {
         int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);

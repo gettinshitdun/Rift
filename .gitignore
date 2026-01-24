@@ -3,3 +3,6 @@
 rift-client
 rift-server
 build/
+*.log
+*.tmp
+.DS_Store

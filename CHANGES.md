@@ -1,4 +1,26 @@
-# RIFT CI/CD & Testing Setup - Summary
+# RIFT Changes & Updates
+
+**Last Updated:** January 25, 2026  
+
+---
+
+## v1.1.0 - Dynamic Subdomains (January 25, 2026)
+
+### Changes
+- Added `FRAME_TUNNEL_READY` (frame type 7) for tunnel ID assignment
+- Server: Added `generate_random_tunnel_id()` for auto-generating 8-character IDs
+- Server: Updated tunnel registration to send assigned ID back to client
+- Client: Added handler for `FRAME_TUNNEL_READY` to display assigned tunnel URL
+- Client: Displays format: `https://<random_id>.rift.kanishakmittal.site`
+
+### Files Modified
+- `server/include/frame.h` - Added FRAME_TUNNEL_READY type
+- `server/handlers.c` - Random ID generation and assignment
+- `client/main.c` - Receive and display assigned URL
+
+---
+
+## Previous: CI/CD & Testing Setup (v1.0.0)
 
 **Date:** January 23, 2026  
 **Changes:** GitHub Actions workflows, comprehensive documentation, test suite enhancements

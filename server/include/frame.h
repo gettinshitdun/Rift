@@ -14,7 +14,8 @@ typedef enum {
     FRAME_DATA            = 3,
     FRAME_ERROR           = 4,
     FRAME_CLOSE           = 5,
-    FRAME_ACK             = 6
+    FRAME_ACK             = 6,
+    FRAME_TUNNEL_READY    = 7
 } frame_type_t;
 
 typedef struct {

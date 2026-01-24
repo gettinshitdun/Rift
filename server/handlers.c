@@ -2,9 +2,26 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stdlib.h>
+#include <time.h>
 #include "include/handlers.h"
 #include "include/connection.h"
 #include "include/frame.h"
+
+/* --- Random ID generation --- */
+static const char *CHARSET = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+void generate_random_tunnel_id(char *buffer, size_t len) {
+    static int seeded = 0;
+    if (!seeded) {
+        srand(time(NULL));
+        seeded = 1;
+    }
+    for (size_t i = 0; i < len - 1; i++) {
+        buffer[i] = CHARSET[rand() % 36];
+    }
+    buffer[len - 1] = '\0';
+}
 
 /* --- Helpers --- */
 
@@ -97,10 +114,22 @@ int handle_rift_frame(int fd) {
 
     // Scenario A: Standard registration from client
     if (type == FRAME_REGISTER_TUNNEL) {
-        snprintf(c->tunnel_id, sizeof(c->tunnel_id), "%.*s", (int)len, payload);
+        // If client provides a tunnel ID, use it; otherwise generate one
+        if (len > 0) {
+            snprintf(c->tunnel_id, sizeof(c->tunnel_id), "%.*s", (int)len, payload);
+        } else {
+            // Generate a random 8-character tunnel ID
+            generate_random_tunnel_id(c->tunnel_id, 9);
+        }
 
         // TRANSITION STATE: Move to active tunnel mode
         c->state = CONN_TUNNEL_READY;
+
+        // Send back the assigned tunnel ID to the client via FRAME_TUNNEL_READY
+        if (frame_write(fd, FRAME_TUNNEL_READY, c->tunnel_id, strlen(c->tunnel_id)) < 0) {
+            fprintf(stderr, "[tunnel] Failed to send tunnel assignment: %s\n", strerror(errno));
+            return -1;
+        }
 
         fprintf(stderr, "[tunnel] Registered: %s (fd=%d)\n", c->tunnel_id, fd);
         return 0;

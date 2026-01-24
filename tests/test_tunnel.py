@@ -18,6 +18,7 @@ FRAME_REGISTER_TUNNEL = 1
 FRAME_CONNECT_REQUEST = 2
 FRAME_DATA = 3
 FRAME_CLOSE = 5
+FRAME_TUNNEL_READY = 7
 
 TUNNEL_PORT = 7000
 PUBLIC_PORT = 9000
@@ -82,6 +83,9 @@ class MockTunnelClient:
                 if ftype == FRAME_DATA:
                     return payload.decode('utf-8', errors='replace')
                 elif ftype == FRAME_CONNECT_REQUEST:
+                    continue
+                elif ftype == FRAME_TUNNEL_READY:
+                    # Skip tunnel ready response and continue waiting for data
                     continue
                 else:
                     print(f"    [DEBUG] Unexpected frame type: {ftype}")
