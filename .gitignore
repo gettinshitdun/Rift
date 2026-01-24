@@ -3,3 +3,6 @@
 rift-client
 rift-server
 build/
+deploy.sh
+setup-server.sh
+rift-server.service
