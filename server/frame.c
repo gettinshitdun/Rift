@@ -36,7 +36,7 @@ static int write_full(int fd, const void *buf, size_t len) {
 static int read_full(int fd, void *buf, size_t len) {
     size_t off = 0;
     int retries = 0;
-    const int MAX_RETRIES = 5;  // Allow some retries for partial reads
+    const int MAX_RETRIES = 100;  // Allow many retries for non-blocking sockets
 
     while (off < len) {
         ssize_t n = read(fd, (char*)buf + off, len - off);
@@ -55,19 +55,14 @@ static int read_full(int fd, void *buf, size_t len) {
             }
 
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                if (off == 0) {
-                    // No data available at all
-                    return -1;
-                } else {
-                    // Partial frame - retry a few times
-                    if (++retries < MAX_RETRIES) {
-                        usleep(10);
-                        continue;
-                    }
-                    // Give up after max retries
-                    errno = ETIMEDOUT;
-                    return -1;
+                // Data not available yet - retry
+                if (++retries < MAX_RETRIES) {
+                    usleep(100);  // Wait a bit for data to arrive
+                    continue;
                 }
+                // Give up after max retries
+                errno = ETIMEDOUT;
+                return -1;
             }
             return -1;  // Real error
         }
