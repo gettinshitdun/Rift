@@ -223,8 +223,13 @@ int main(int argc, char *argv[]) {
                                 }
                                 break; // No more complete frames
                             }
-                            fprintf(stderr, "[!] Server connection error: %s\n", strerror(errno));
-                            goto cleanup;
+                            if (errno == ECONNRESET || errno == EPIPE) {
+                                printf("[!] Server connection reset, waiting for reconnect...\n");
+                                goto cleanup;
+                            }
+                            // Log but continue on transient errors
+                            fprintf(stderr, "[*] Frame read error (continuing): %s\n", strerror(errno));
+                            break;
                         }
                         frames_read++;
 
