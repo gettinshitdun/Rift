@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <sys/random.h>
+#include <signal.h>
 
 #include "../server/include/frame.h"
 
@@ -20,6 +21,14 @@ typedef struct {
     char buf[FRAME_MAX_PAYLOAD + 16];
     size_t len;
 } frame_buffer_t;
+
+static volatile int should_exit = 0;
+
+static void signal_handler(int signum) {
+    if (signum == SIGINT) {
+        should_exit = 1;
+    }
+}
 
 static frame_buffer_t frame_buf = {0};
 
@@ -146,6 +155,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Ignore SIGPIPE to prevent crash when writing to closed connections
+    signal(SIGPIPE, SIG_IGN);
+
     // Allow server address override via environment variable for testing
     const char *server_ip = getenv("RIFT_SERVER_IP");
     if (!server_ip) {
@@ -166,47 +178,69 @@ int main(int argc, char *argv[]) {
     printf("\n📡 Public URLs:\n");
     printf("   http://%s.rift.kanishakmittal.site\n", tunnel_id);
     printf("   https://%s.rift.kanishakmittal.site\n", tunnel_id);
-    printf("-------------------\n\n");
+    printf("-------------------\n");
+    printf("🔄 Tunnel active. Press Ctrl+C to stop.\n\n");
 
-    int server_fd = tcp_connect(server_ip, server_port);
-    if (server_fd < 0) {
-        perror("Error: Could not connect to Rift Server");
-        return 1;
-    }
+    // Register Ctrl+C handler for graceful shutdown
+    signal(SIGINT, signal_handler);
 
-    if (frame_write(server_fd, FRAME_REGISTER_TUNNEL, tunnel_id, (uint32_t)strlen(tunnel_id)) < 0) {
-        perror("Error: Failed to send registration frame");
-        close(server_fd);
-        return 1;
-    }
+    // Retry loop with exponential backoff
+    int retry_count = 0;
+    const int max_backoff_ms = 30000;  // 30 seconds max
 
-    int local_fd = -1;
-    int epfd = epoll_create1(0);
-    if (epfd < 0) {
-        perror("epoll_create1");
-        close(server_fd);
-        return 1;
-    }
-
-    struct epoll_event ev, events[MAX_EVENTS];
-
-    ev.events = EPOLLIN;
-    ev.data.fd = server_fd;
-    epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &ev);
-
-    while (1) {
-        int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
-        if (nfds < 0) {
-            if (errno == EINTR) continue;
-            perror("epoll_wait");
-            break;
+    while (!should_exit) {
+        int server_fd = tcp_connect(server_ip, server_port);
+        if (server_fd < 0) {
+            int backoff_ms = (1 << retry_count) * 1000;  // Exponential: 1s, 2s, 4s, 8s, ...
+            if (backoff_ms > max_backoff_ms) backoff_ms = max_backoff_ms;
+            
+            printf("[%d] Connection failed, retrying in %d ms...\n", ++retry_count, backoff_ms);
+            usleep(backoff_ms * 1000);
+            continue;
         }
 
-        for (int i = 0; i < nfds; i++) {
-            uint32_t revents = events[i].events;
-            int fd = events[i].data.fd;
+        if (frame_write(server_fd, FRAME_REGISTER_TUNNEL, tunnel_id, (uint32_t)strlen(tunnel_id)) < 0) {
+            fprintf(stderr, "[!] Failed to send registration frame\n");
+            close(server_fd);
+            int backoff_ms = (1 << retry_count) * 1000;
+            if (backoff_ms > max_backoff_ms) backoff_ms = max_backoff_ms;
+            printf("[%d] Registration failed, retrying in %d ms...\n", ++retry_count, backoff_ms);
+            usleep(backoff_ms * 1000);
+            continue;
+        }
 
-            if (revents & EPOLLIN) {
+        // Reset retry counter on successful connection
+        retry_count = 0;
+        printf("[✓] Tunnel connected, relay active\n\n");
+
+        int local_fd = -1;
+        int epfd = epoll_create1(0);
+        if (epfd < 0) {
+            perror("epoll_create1");
+            close(server_fd);
+            continue;
+        }
+
+        struct epoll_event ev, events[MAX_EVENTS];
+
+        ev.events = EPOLLIN;
+        ev.data.fd = server_fd;
+        epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &ev);
+
+        int connection_active = 1;
+        while (connection_active && !should_exit) {
+            int nfds = epoll_wait(epfd, events, MAX_EVENTS, 1000);  // 1 second timeout to check should_exit
+            if (nfds < 0) {
+                if (errno == EINTR) continue;
+                perror("epoll_wait");
+                break;
+            }
+
+            for (int i = 0; i < nfds; i++) {
+                uint32_t revents = events[i].events;
+                int fd = events[i].data.fd;
+
+                if (revents & EPOLLIN) {
                 if (fd == server_fd) {
                     // Read all available frames from server using buffered reader
                     int frames_read = 0;
@@ -224,8 +258,9 @@ int main(int argc, char *argv[]) {
                                 break; // No more complete frames
                             }
                             if (errno == ECONNRESET || errno == EPIPE) {
-                                printf("[!] Server connection reset, waiting for reconnect...\n");
-                                goto cleanup;
+                                printf("[*] Server connection lost, will reconnect...\n");
+                                connection_active = 0;
+                                break;
                             }
                             // Log but continue on transient errors
                             fprintf(stderr, "[*] Frame read error (continuing): %s\n", strerror(errno));
@@ -254,14 +289,22 @@ int main(int argc, char *argv[]) {
                             if (local_fd > 0) {
                                 ssize_t written = write(local_fd, payload, len);
                                 if (written < 0) {
-                                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                                        perror("[!] Write to local service failed");
+                                    if (errno == EPIPE || errno == ECONNRESET) {
+                                        // Connection was closed, don't spam errors
+                                        if (frame_write(server_fd, FRAME_CLOSE, NULL, 0) < 0) {
+                                            // Ignore errors on FRAME_CLOSE
+                                        }
+                                        epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
+                                        close(local_fd);
+                                        local_fd = -1;
+                                    } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                                        fprintf(stderr, "[*] Write error (continuing): %s\n", strerror(errno));
                                     }
                                 } else if (written != (ssize_t)len) {
-                                    fprintf(stderr, "[!] Partial write: %ld/%u bytes\n", written, len);
+                                    fprintf(stderr, "[*] Partial write: %ld/%u bytes\n", written, len);
                                 }
                             } else {
-                                printf("[!] Dropped %u bytes (no local connection)\n", len);
+                                // Silently drop bytes when no connection (normal during refresh)
                             }
                         }
                         else if (type == FRAME_CLOSE) {
@@ -285,7 +328,7 @@ int main(int argc, char *argv[]) {
                         if (n > 0) {
                             if (frame_write(server_fd, FRAME_DATA, buffer, (uint32_t)n) < 0) {
                                 fprintf(stderr, "[!] Failed to send to server: %s\n", strerror(errno));
-                                goto cleanup;
+                                connection_active = 0; break;
                             }
                         } else if (n < 0) {
                             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -309,22 +352,37 @@ int main(int argc, char *argv[]) {
 
             if (revents & (EPOLLHUP | EPOLLERR)) {
                 if (fd == server_fd) {
-                    printf("[!] Server connection lost\n");
-                    goto cleanup;
+                    fprintf(stderr, "[*] Server hangup detected\n");
+                    // Don't exit on hangup - the connection may recover
+                    // Just log and continue
                 } else if (fd == local_fd) {
-                    printf("[*] Local connection closed\n");
+                    // Local connection closed (browser cancelled request)
                     epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
                     close(local_fd);
                     local_fd = -1;
                 }
             }
         }
+
+        // Connection loop ended, cleanup and retry if not exiting
+        close(server_fd);
+        if (local_fd > 0) close(local_fd);
+        close(epfd);
+
+        if (should_exit) {
+            break;  // Exit the retry loop if Ctrl+C was pressed
+        }
+
+        // Wait before retrying
+        if (!should_exit) {
+            int backoff_ms = (1 << retry_count) * 1000;
+            if (backoff_ms > max_backoff_ms) backoff_ms = max_backoff_ms;
+            printf("[%d] Connection lost, retrying in %d ms...\n", ++retry_count, backoff_ms);
+            usleep(backoff_ms * 1000);
+        }
     }
 
-cleanup:
-    printf("\n[*] Shutting down...\n");
-    close(server_fd);
-    if (local_fd > 0) close(local_fd);
-    close(epfd);
+    printf("\n[✓] Tunnel stopped (Ctrl+C)\n");
     return 0;
+}
 }
