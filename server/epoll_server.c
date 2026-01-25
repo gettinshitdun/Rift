@@ -138,7 +138,15 @@ static void handle_initial_frame(int epfd, int fd) {
     if (memcmp(buf, "RIFT", 4) == 0) {
         if (handle_rift_frame(fd) == 0) return;
     }
-    else if (memcmp(buf, "GET ", 4) == 0 || memcmp(buf, "POST", 4) == 0) {
+    else if (memcmp(buf, "GET ", 4) == 0 || 
+             memcmp(buf, "POST", 4) == 0 ||
+             memcmp(buf, "PUT ", 4) == 0 ||
+             memcmp(buf, "DELE", 4) == 0 ||  // DELETE
+             memcmp(buf, "PATC", 4) == 0 ||  // PATCH
+             memcmp(buf, "HEAD", 4) == 0 ||
+             memcmp(buf, "OPTI", 4) == 0 ||  // OPTIONS
+             memcmp(buf, "CONN", 4) == 0 ||  // CONNECT
+             memcmp(buf, "TRAC", 4) == 0) {  // TRACE
         char full_buf[2048];
         ssize_t total = recv(fd, full_buf, sizeof(full_buf) - 1, 0);
         if (total > 0) {
