@@ -55,13 +55,9 @@ jobs:
 
       - name: Prepare individual binaries
         run: |
-          # Copy individual binaries for direct download
+          # Copy individual binaries for direct download with platform suffix
           cp rift-server rift-server-${{ matrix.artifact-suffix }}
           cp rift-client rift-client-${{ matrix.artifact-suffix }}
-          
-          # Also create generic names for latest
-          cp rift-server rift-server
-          cp rift-client rift-client
           
           ls -lh rift-server* rift-client*
 
@@ -74,7 +70,7 @@ jobs:
           shasum -a 256 rift-client-${{ matrix.artifact-suffix }} > rift-client-${{ matrix.artifact-suffix }}.sha256
           shasum -a 256 rift-server > rift-server.sha256
           shasum -a 256 rift-client > rift-client.sha256
-          cat rift-*.sha256
+          cat *.sha256
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -82,11 +78,11 @@ jobs:
           name: rift-builds
           path: |
             rift-*.tar.gz
-            rift-*.tar.gz.sha256
-            rift-server*
-            rift-client*
-            !rift-server-dist/
-            !rift-client-dist/
+            rift-*.sha256
+            rift-server
+            rift-client
+            rift-server-${{ matrix.artifact-suffix }}
+            rift-client-${{ matrix.artifact-suffix }}
 
   create-release:
     runs-on: ubuntu-latest
