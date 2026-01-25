@@ -15,6 +15,12 @@
 #define MAX_EVENTS 10
 #define DEFAULT_SERVER_IP "43.205.120.186"
 #define DEFAULT_SERVER_PORT 7000
+#define MAX_RECONNECT_ATTEMPTS 5
+#define RECONNECT_DELAY_BASE 2  // seconds
+
+#define LOG(fmt, ...) fprintf(stderr, "[LOG] " fmt "\n", ##__VA_ARGS__)
+#define WARN(fmt, ...) fprintf(stderr, "[WARN] " fmt "\n", ##__VA_ARGS__)
+#define ERR(fmt, ...) fprintf(stderr, "[ERROR] " fmt "\n", ##__VA_ARGS__)
 
 typedef struct {
     char buf[FRAME_MAX_PAYLOAD + 16];
@@ -134,6 +140,56 @@ int frame_read_buffered(int fd, frame_type_t *type, char *payload, uint32_t *len
     return 0;
 }
 
+int reconnect_to_server(const char *server_ip, int server_port, const char *tunnel_id, int epfd) {
+    for (int attempt = 1; attempt <= MAX_RECONNECT_ATTEMPTS; attempt++) {
+        LOG("Reconnection attempt %d/%d to server %s:%d", attempt, MAX_RECONNECT_ATTEMPTS, server_ip, server_port);
+        
+        int server_fd = tcp_connect(server_ip, server_port);
+        if (server_fd < 0) {
+            ERR("Reconnection attempt %d failed: %s", attempt, strerror(errno));
+            if (attempt < MAX_RECONNECT_ATTEMPTS) {
+                int delay = RECONNECT_DELAY_BASE * attempt;
+                LOG("Waiting %d seconds before next attempt...", delay);
+                sleep(delay);
+            }
+            continue;
+        }
+        
+        LOG("Reconnected to server, fd=%d", server_fd);
+        
+        // Send registration frame
+        LOG("Re-registering tunnel: %s", tunnel_id);
+        if (frame_write(server_fd, FRAME_REGISTER_TUNNEL, tunnel_id, (uint32_t)strlen(tunnel_id)) < 0) {
+            ERR("Failed to re-register tunnel on attempt %d", attempt);
+            close(server_fd);
+            if (attempt < MAX_RECONNECT_ATTEMPTS) {
+                int delay = RECONNECT_DELAY_BASE * attempt;
+                sleep(delay);
+            }
+            continue;
+        }
+        
+        LOG("Re-registration successful");
+        
+        // Add to epoll
+        struct epoll_event ev = {.events = EPOLLIN, .data.fd = server_fd};
+        if (epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &ev) < 0) {
+            ERR("Failed to add reconnected server fd to epoll: %s", strerror(errno));
+            close(server_fd);
+            continue;
+        }
+        
+        // Clear any buffered data from previous connection
+        memset(&frame_buf, 0, sizeof(frame_buf));
+        
+        LOG("Server reconnection successful");
+        return server_fd;
+    }
+    
+    ERR("Failed to reconnect to server after %d attempts", MAX_RECONNECT_ATTEMPTS);
+    return -1;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 3 || strcmp(argv[1], "expose") != 0) {
         fprintf(stderr, "Usage: rift expose <port>\n");
@@ -170,15 +226,18 @@ int main(int argc, char *argv[]) {
 
     int server_fd = tcp_connect(server_ip, server_port);
     if (server_fd < 0) {
-        perror("Error: Could not connect to Rift Server");
+        ERR("Could not connect to Rift Server");
         return 1;
     }
+    LOG("Connected to server, fd=%d", server_fd);
 
+    LOG("Sending registration frame for tunnel: %s", tunnel_id);
     if (frame_write(server_fd, FRAME_REGISTER_TUNNEL, tunnel_id, (uint32_t)strlen(tunnel_id)) < 0) {
-        perror("Error: Failed to send registration frame");
+        ERR("Failed to send registration frame");
         close(server_fd);
         return 1;
     }
+    LOG("Registration successful");
 
     int local_fd = -1;
     int epfd = epoll_create1(0);
@@ -194,14 +253,16 @@ int main(int argc, char *argv[]) {
     ev.data.fd = server_fd;
     epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &ev);
 
+    LOG("Event loop started");
     while (1) {
         int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
         if (nfds < 0) {
             if (errno == EINTR) continue;
-            perror("epoll_wait");
+            ERR("epoll_wait failed: %s", strerror(errno));
             break;
         }
 
+        LOG("epoll returned %d events", nfds);
         for (int i = 0; i < nfds; i++) {
             uint32_t revents = events[i].events;
             int fd = events[i].data.fd;
@@ -209,7 +270,6 @@ int main(int argc, char *argv[]) {
             if (revents & EPOLLIN) {
                 if (fd == server_fd) {
                     // Read all available frames from server using buffered reader
-                    int frames_read = 0;
                     while (1) {
                         frame_type_t type;
                         char payload[FRAME_MAX_PAYLOAD];
@@ -218,36 +278,56 @@ int main(int argc, char *argv[]) {
                         int res = frame_read_buffered(server_fd, &type, payload, &len);
                         if (res < 0) {
                             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EPROTO || errno == EBADMSG) {
-                                if (frames_read == 0 && errno == EAGAIN) {
-                                    // Normal condition - just no data available
-                                }
-                                break; // No more complete frames
+                                LOG("No more frames available");
+                                break;
                             }
                             if (errno == ECONNRESET || errno == EPIPE) {
-                                printf("[!] Server connection reset, waiting for reconnect...\n");
-                                goto cleanup;
+                                ERR("Server connection lost: %s", strerror(errno));
+                                
+                                // Remove old server fd from epoll
+                                epoll_ctl(epfd, EPOLL_CTL_DEL, server_fd, NULL);
+                                close(server_fd);
+                                
+                                // Close any existing local connection
+                                if (local_fd > 0) {
+                                    LOG("Closing local connection during reconnection");
+                                    epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
+                                    close(local_fd);
+                                    local_fd = -1;
+                                }
+                                
+                                // Attempt to reconnect
+                                server_fd = reconnect_to_server(server_ip, server_port, tunnel_id, epfd);
+                                if (server_fd < 0) {
+                                    ERR("Failed to reconnect to server, shutting down");
+                                    goto cleanup;
+                                }
+                                break;
                             }
-                            // Log but continue on transient errors
-                            fprintf(stderr, "[*] Frame read error (continuing): %s\n", strerror(errno));
+                            WARN("Frame read error: %s (continuing)", strerror(errno));
                             break;
                         }
-                        frames_read++;
+                        LOG("Frame received: type=%d, len=%u", type, len);
 
                         // Process the frame
                         if (type == FRAME_CONNECT_REQUEST) {
+                            LOG("FRAME_CONNECT_REQUEST received");
                             // Close existing local connection if any
                             if (local_fd > 0) {
+                                LOG("Closing existing local connection fd=%d", local_fd);
                                 epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
                                 close(local_fd);
                             }
 
                             // Connect to local service
+                            LOG("Connecting to local service on port %d", local_port);
                             local_fd = tcp_connect("127.0.0.1", local_port);
                             if (local_fd > 0) {
+                                LOG("Local connection established fd=%d", local_fd);
                                 struct epoll_event lev = {.events = EPOLLIN, .data.fd = local_fd};
                                 epoll_ctl(epfd, EPOLL_CTL_ADD, local_fd, &lev);
                             } else {
-                                perror("[!] Failed to connect to local service");
+                                ERR("Failed to connect to local service: %s", strerror(errno));
                             }
                         }
                         else if (type == FRAME_DATA) {
@@ -284,8 +364,13 @@ int main(int argc, char *argv[]) {
                         ssize_t n = read(local_fd, buffer, sizeof(buffer));
                         if (n > 0) {
                             if (frame_write(server_fd, FRAME_DATA, buffer, (uint32_t)n) < 0) {
-                                fprintf(stderr, "[!] Failed to send to server: %s\n", strerror(errno));
-                                goto cleanup;
+                                ERR("Failed to send to server: %s", strerror(errno));
+                                if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) {
+                                    LOG("Server connection lost during write, will reconnect on next epoll event");
+                                    break;
+                                } else {
+                                    goto cleanup;
+                                }
                             }
                         } else if (n < 0) {
                             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -296,7 +381,7 @@ int main(int argc, char *argv[]) {
                         } else {
                             // Connection closed - send FRAME_CLOSE to notify server
                             if (frame_write(server_fd, FRAME_CLOSE, NULL, 0) < 0) {
-                                fprintf(stderr, "[!] Failed to notify server of close: %s\n", strerror(errno));
+                                WARN("Failed to notify server of close: %s", strerror(errno));
                             }
                             epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
                             close(local_fd);
@@ -308,11 +393,32 @@ int main(int argc, char *argv[]) {
             }
 
             if (revents & (EPOLLHUP | EPOLLERR)) {
+                LOG("EPOLLHUP|EPOLLERR on fd=%d (EPOLLHUP=%s EPOLLERR=%s)", fd,
+                    (revents & EPOLLHUP) ? "yes" : "no",
+                    (revents & EPOLLERR) ? "yes" : "no");
                 if (fd == server_fd) {
-                    printf("[!] Server connection lost\n");
-                    goto cleanup;
+                    ERR("Server connection lost (EPOLL event)");
+                    
+                    // Remove old server fd from epoll
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, server_fd, NULL);
+                    close(server_fd);
+                    
+                    // Close any existing local connection
+                    if (local_fd > 0) {
+                        LOG("Closing local connection during reconnection");
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
+                        close(local_fd);
+                        local_fd = -1;
+                    }
+                    
+                    // Attempt to reconnect
+                    server_fd = reconnect_to_server(server_ip, server_port, tunnel_id, epfd);
+                    if (server_fd < 0) {
+                        ERR("Failed to reconnect to server, shutting down");
+                        goto cleanup;
+                    }
                 } else if (fd == local_fd) {
-                    printf("[*] Local connection closed\n");
+                    LOG("Local connection closed");
                     epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
                     close(local_fd);
                     local_fd = -1;
@@ -322,9 +428,15 @@ int main(int argc, char *argv[]) {
     }
 
 cleanup:
-    printf("\n[*] Shutting down...\n");
+    LOG("Cleanup: closing connections");
+    LOG("Closing server_fd=%d", server_fd);
     close(server_fd);
-    if (local_fd > 0) close(local_fd);
+    if (local_fd > 0) {
+        LOG("Closing local_fd=%d", local_fd);
+        close(local_fd);
+    }
+    LOG("Closing epfd=%d", epfd);
     close(epfd);
+    LOG("Shutdown complete");
     return 0;
 }
