@@ -18,7 +18,10 @@
 #define MAX_RECONNECT_ATTEMPTS 5
 #define RECONNECT_DELAY_BASE 2  // seconds
 
-#define LOG(fmt, ...) fprintf(stderr, "[LOG] " fmt "\n", ##__VA_ARGS__)
+// Global verbose flag
+static int verbose = 0;
+
+#define LOG(fmt, ...) do { if (verbose) fprintf(stderr, "[LOG] " fmt "\n", ##__VA_ARGS__); } while(0)
 #define WARN(fmt, ...) fprintf(stderr, "[WARN] " fmt "\n", ##__VA_ARGS__)
 #define ERR(fmt, ...) fprintf(stderr, "[ERROR] " fmt "\n", ##__VA_ARGS__)
 
@@ -28,6 +31,43 @@ typedef struct {
 } frame_buffer_t;
 
 static frame_buffer_t frame_buf = {0};
+
+// Check if local service is running on the specified port
+int check_local_service(int port) {
+    int test_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (test_fd < 0) {
+        return -1;
+    }
+    
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    
+    // Try to connect with a short timeout
+    struct timeval timeout = {.tv_sec = 1, .tv_usec = 0};
+    setsockopt(test_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(test_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    
+    int result = connect(test_fd, (struct sockaddr*)&addr, sizeof(addr));
+    close(test_fd);
+    
+    if (result == 0) {
+        // Connected successfully - service is running
+        return 0;
+    } else {
+        // Connection failed - check why
+        if (errno == ECONNREFUSED) {
+            // Port is not open - no service running
+            return -1;
+        } else if (errno == ETIMEDOUT) {
+            // Timeout - probably no service
+            return -1;
+        }
+        // Other errors - assume no service
+        return -1;
+    }
+}
 
 void generate_random_id(char *buf, size_t len) {
     const char *adj[] = {"bold", "swift", "calm", "fiery", "dark", "neon", "silver", "golden", "arctic", "cosmic"};
@@ -191,16 +231,39 @@ int reconnect_to_server(const char *server_ip, int server_port, const char *tunn
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 3 || strcmp(argv[1], "expose") != 0) {
-        fprintf(stderr, "Usage: rift expose <port>\n");
+    // Parse arguments - support verbose flag
+    if (argc < 3) {
+        fprintf(stderr, "Usage: %s [--verbose] expose <port>\n", argv[0]);
+        fprintf(stderr, "  --verbose    Enable debug logging\n");
+        return 1;
+    }
+    
+    int arg_idx = 1;
+    if (argc >= 4 && strcmp(argv[1], "--verbose") == 0) {
+        verbose = 1;
+        arg_idx = 2;
+    }
+    
+    if (strcmp(argv[arg_idx], "expose") != 0) {
+        fprintf(stderr, "Usage: %s [--verbose] expose <port>\n", argv[0]);
         return 1;
     }
 
-    int local_port = atoi(argv[2]);
+    int local_port = atoi(argv[arg_idx + 1]);
     if (local_port <= 0 || local_port > 65535) {
         fprintf(stderr, "Error: Invalid port %d\n", local_port);
         return 1;
     }
+
+    // Check if local service is running on the port
+    printf("Checking local service on port %d...\n", local_port);
+    if (check_local_service(local_port) < 0) {
+        fprintf(stderr, "Error: No service found running on port %d\n", local_port);
+        fprintf(stderr, "Please start your local service first, then run:\n");
+        fprintf(stderr, "  %s expose %d\n", argv[0], local_port);
+        return 1;
+    }
+    printf("✓ Local service detected on port %d\n", local_port);
 
     // Allow server address override via environment variable for testing
     const char *server_ip = getenv("RIFT_SERVER_IP");
