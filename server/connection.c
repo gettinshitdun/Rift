@@ -85,12 +85,18 @@ void connection_close(int epfd, int fd) {
         if (p && p->peer_fd == fd) {
             p->peer_fd = 0;
             if (orig_state == CONN_TUNNEL_READY || orig_state == CONN_TUNNEL_FORWARDING) {
+                // Tunnel connection is closing - close its paired browser connection
                 connection_close(epfd, peer);
             } else if (orig_state == CONN_PUBLIC_INIT || orig_state == CONN_PUBLIC_FORWARDING) {
-                if (frame_write(peer, FRAME_CLOSE, NULL, 0) < 0) {
-                    fprintf(stderr, "[connection] Failed to send FRAME_CLOSE to tunnel (fd=%d): %s\n", peer, strerror(errno));
+                // Browser connection is closing - need to handle properly
+                if (orig_state == CONN_PUBLIC_FORWARDING) {
+                    // Browser cancelled during active request - notify tunnel to abort
+                    if (frame_write(peer, FRAME_CLOSE, "browser_cancelled", 17) < 0) {
+                        fprintf(stderr, "[connection] Failed to notify tunnel of browser cancellation (fd=%d): %s\n", peer, strerror(errno));
+                    }
                 }
-                p->state = CONN_TUNNEL_READY;
+                p->state = CONN_TUNNEL_READY;  // Reset tunnel to ready for next browser request
+                fprintf(stderr, "[connection] Browser closed (fd=%d), tunnel (fd=%d) reset to ready\n", fd, peer);
             }
         }
     }

@@ -345,11 +345,17 @@ int main(int argc, char *argv[]) {
                             }
                         }
                         else if (type == FRAME_CLOSE) {
+                            LOG("FRAME_CLOSE received from server");
                             if (local_fd > 0) {
-                                printf("[*] Local connection closed\n");
+                                LOG("Closing local connection due to server FRAME_CLOSE");
                                 epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
                                 close(local_fd);
                                 local_fd = -1;
+                            }
+                            // Check if this is a browser cancellation vs tunnel shutdown
+                            if (len > 0 && strncmp(payload, "browser_cancelled", 17) == 0) {
+                                LOG("Browser request was cancelled, ready for next request");
+                                // Don't shutdown client - just reset and wait for next request
                             }
                         }
                         else {

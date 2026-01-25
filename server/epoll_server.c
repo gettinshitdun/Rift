@@ -190,27 +190,29 @@ static void handle_connection_event(int epfd, int fd) {
             break;
 
         case CONN_TUNNEL_READY:
-            if (frame_read(fd, &type, buf, &len) == 0) {
-                if (type == FRAME_DATA) {
-                    if (c->peer_fd > 0) {
-                        ssize_t sent = write(c->peer_fd, buf, len);
-                        if (sent < 0) {
-                            if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                                log_error("Write to peer failed: %s", strerror(errno));
-                                connection_close(epfd, fd);
-                            }
-                        } else if (sent != (ssize_t)len) {
-                            log_error("Partial write: %ld/%u bytes", sent, len);
-                        }
+            // Tunnel in READY state should not send unexpected data
+            // Only read if epoll indicates data is available
+            {
+                int frame_result = frame_read(fd, &type, buf, &len);
+                if (frame_result == 0) {
+                    if (type == FRAME_DATA) {
+                        log_error("Unexpected FRAME_DATA on tunnel in READY state (fd=%d)", fd);
+                        // Tunnel shouldn't send data when not forwarding
+                        connection_close(epfd, fd);
+                    } else if (type == FRAME_CLOSE) {
+                        log_error("Tunnel closed connection (fd=%d)", fd);
+                        connection_close(epfd, fd);
+                    } else {
+                        log_error("Unexpected frame type %d in tunnel READY state", type);
+                        connection_close(epfd, fd);
                     }
-                } else if (type == FRAME_CLOSE) {
-                    log_error("Unexpected FRAME_CLOSE on tunnel in READY state (fd=%d)", fd);
+                } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // No data available - this is normal for READY state, don't error
+                    // Tunnel is just keeping connection alive
                 } else {
-                    log_error("Unexpected frame type %d in tunnel mode", type);
+                    log_error("Failed to read frame from tunnel: %s", strerror(errno));
+                    connection_close(epfd, fd);
                 }
-            } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                log_error("Failed to read frame from tunnel: %s", strerror(errno));
-                connection_close(epfd, fd);
             }
             break;
 

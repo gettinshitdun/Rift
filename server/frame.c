@@ -36,7 +36,7 @@ static int write_full(int fd, const void *buf, size_t len) {
 static int read_full(int fd, void *buf, size_t len) {
     size_t off = 0;
     int retries = 0;
-    const int MAX_RETRIES = 100;  // Allow many retries for non-blocking sockets
+    const int MAX_RETRIES = 5;  // Reduced retries for faster timeout
 
     while (off < len) {
         ssize_t n = read(fd, (char*)buf + off, len - off);
