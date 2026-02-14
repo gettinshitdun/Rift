@@ -36,43 +36,34 @@ connection_t* connection_get(int fd) {
 
 void connection_add_tunnel(int fd) {
     connection_t *c = connection_alloc(fd);
-    if (!c) {
-        close(fd);
-        return;
-    }
+    if (!c) { close(fd); return; }
     c->state = CONN_TUNNEL_INIT;
 }
 
 void connection_add_public(int fd) {
     connection_t *c = connection_alloc(fd);
-    if (!c) {
-        close(fd);
-        return;
-    }
+    if (!c) { close(fd); return; }
     c->state = CONN_PUBLIC_INIT;
-}
-
-void connection_bind(int browser_fd, int tunnel_fd) {
-    connection_t *b = connection_get(browser_fd);
-    connection_t *t = connection_get(tunnel_fd);
-    if (!b || !t) return;
-
-    b->peer_fd = tunnel_fd;
-    t->peer_fd = browser_fd;
-    b->state = CONN_PUBLIC_FORWARDING;
-    t->state = CONN_TUNNEL_FORWARDING;
 }
 
 void connection_close(int epfd, int fd) {
     connection_t *c = connection_get(fd);
     if (!c || c->fd == 0) return;
 
-    int peer = c->peer_fd;
     conn_state_t orig_state = c->state;
+    int tunnel_fd = c->peer_fd;
+    uint32_t sid = c->stream_id;
+
+    /* If a tunnel is dying, close all its active browser streams */
+    if (orig_state == CONN_TUNNEL_INIT || orig_state == CONN_TUNNEL_READY) {
+        tunnel_close_all_streams(c, epfd);
+    }
 
     c->fd = 0;
     c->peer_fd = 0;
     c->state = 0;
+    c->stream_id = 0;
+    c->stream_count = 0;
     c->tunnel_id[0] = '\0';
     c->service_id[0] = '\0';
     active_connections--;
@@ -80,37 +71,16 @@ void connection_close(int epfd, int fd) {
     epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
     close(fd);
 
-    if (peer > 0) {
-        connection_t *p = connection_get(peer);
-        if (p && p->peer_fd == fd) {
-            p->peer_fd = 0;
-            if (orig_state == CONN_TUNNEL_READY || orig_state == CONN_TUNNEL_FORWARDING) {
-                // Tunnel connection is closing - close its paired browser connection
-                connection_close(epfd, peer);
-            } else if (orig_state == CONN_PUBLIC_INIT || orig_state == CONN_PUBLIC_FORWARDING) {
-                // Browser connection is closing - need to handle properly
-                if (orig_state == CONN_PUBLIC_FORWARDING) {
-                    // Browser cancelled during active request - notify tunnel to abort
-                    if (frame_write(peer, FRAME_CLOSE, "browser_cancelled", 17) < 0) {
-                        fprintf(stderr, "[connection] Failed to notify tunnel of browser cancellation (fd=%d): %s\n", peer, strerror(errno));
-                    }
-                }
-                p->state = CONN_TUNNEL_READY;  // Reset tunnel to ready for next browser request
-                fprintf(stderr, "[connection] Browser closed (fd=%d), tunnel (fd=%d) reset to ready\n", fd, peer);
-            }
+    /* If a browser dies, remove it from the tunnel's stream map and notify */
+    if (orig_state == CONN_PUBLIC_FORWARDING && tunnel_fd > 0 && sid > 0) {
+        connection_t *t = connection_get(tunnel_fd);
+        if (t && t->fd != 0) {
+            tunnel_remove_stream(t, sid);
+            /* Notify client that this stream's browser is gone */
+            frame_write(tunnel_fd, FRAME_CLOSE, "browser_closed", 14, sid);
+            fprintf(stderr, "[connection] Browser fd=%d stream=%u closed, notified tunnel fd=%d\n",
+                    fd, sid, tunnel_fd);
         }
-    }
-}
-
-void connection_reset_public(int fd) {
-    connection_t *c = connection_get(fd);
-    if (!c || c->fd == 0) return;
-
-    if (c->state == CONN_PUBLIC_FORWARDING) {
-        c->peer_fd = 0;
-        c->state = CONN_PUBLIC_INIT;
-        c->service_id[0] = '\0';
-        fprintf(stderr, "[connection] Reset public connection (fd=%d) back to INIT state for next request\n", fd);
     }
 }
 
@@ -121,19 +91,81 @@ int connection_active_count(void) {
 connection_t* connection_find_tunnel(const char *tunnel_id) {
     for (int i = 0; i < MAX_CONNECTIONS; i++) {
         connection_t *c = &connections[i];
-
-        if (c->fd == 0)
-            continue;
-
-        if (c->state != CONN_TUNNEL_READY)
-            continue;
-
-        if (c->peer_fd != 0)
-            continue;
-
+        if (c->fd == 0) continue;
+        if (c->state != CONN_TUNNEL_READY) continue;
         if (strcmp(c->tunnel_id, tunnel_id) == 0)
             return c;
     }
     return NULL;
 }
 
+/* ---- Stream map operations ---- */
+
+uint32_t tunnel_next_stream_id(connection_t *tunnel) {
+    (void)tunnel;  /* stream IDs are global, not per-tunnel */
+    /* Simple incrementing counter; wraps at UINT32_MAX.
+       Stream 0 is reserved for control frames. */
+    static uint32_t global_stream_counter = 0;
+    return ++global_stream_counter;
+}
+
+int tunnel_add_stream(connection_t *tunnel, uint32_t stream_id, int browser_fd) {
+    if (!tunnel || tunnel->stream_count >= MAX_STREAMS_PER_TUNNEL) return -1;
+    stream_entry_t *e = &tunnel->streams[tunnel->stream_count++];
+    e->stream_id = stream_id;
+    e->browser_fd = browser_fd;
+    return 0;
+}
+
+int tunnel_find_browser(connection_t *tunnel, uint32_t stream_id) {
+    if (!tunnel) return -1;
+    for (int i = 0; i < tunnel->stream_count; i++) {
+        if (tunnel->streams[i].stream_id == stream_id)
+            return tunnel->streams[i].browser_fd;
+    }
+    return -1;
+}
+
+void tunnel_remove_stream(connection_t *tunnel, uint32_t stream_id) {
+    if (!tunnel) return;
+    for (int i = 0; i < tunnel->stream_count; i++) {
+        if (tunnel->streams[i].stream_id == stream_id) {
+            /* Swap with last element for O(1) removal */
+            tunnel->streams[i] = tunnel->streams[tunnel->stream_count - 1];
+            tunnel->stream_count--;
+            return;
+        }
+    }
+}
+
+void tunnel_close_all_streams(connection_t *tunnel, int epfd) {
+    if (!tunnel) return;
+    /* Close all browsers connected through this tunnel */
+    for (int i = 0; i < tunnel->stream_count; i++) {
+        int bfd = tunnel->streams[i].browser_fd;
+        connection_t *b = connection_get(bfd);
+        if (b && b->fd != 0) {
+            /* Prevent cascade back into tunnel (it's already dying) */
+            b->peer_fd = 0;
+            b->stream_id = 0;
+            /* Send 502 to browser */
+            const char *msg = "Tunnel disconnected\n";
+            char resp[256];
+            int rlen = snprintf(resp, sizeof(resp),
+                "HTTP/1.1 502 Bad Gateway\r\n"
+                "Content-Type: text/plain\r\n"
+                "Content-Length: %zu\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+                "%s", strlen(msg), msg);
+            if (write(bfd, resp, rlen) < 0) { /* best effort */ }
+            /* Close the browser connection */
+            b->fd = 0;
+            b->state = 0;
+            active_connections--;
+            epoll_ctl(epfd, EPOLL_CTL_DEL, bfd, NULL);
+            close(bfd);
+        }
+    }
+    tunnel->stream_count = 0;
+}

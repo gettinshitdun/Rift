@@ -13,32 +13,38 @@ import os
 import signal
 
 FRAME_MAGIC = 0x52494654
-FRAME_VERSION = 1
+FRAME_VERSION = 2
 FRAME_REGISTER_TUNNEL = 1
 FRAME_CONNECT_REQUEST = 2
 FRAME_DATA = 3
 FRAME_CLOSE = 5
+FRAME_HEADER_SIZE = 16
 
 TUNNEL_PORT = 7000
 PUBLIC_PORT = 9000
 
-def pack_frame(frame_type, payload=b""):
-    """Pack a frame: magic(4) + version(1) + reserved(1) + type(2) + length(4) + payload"""
+def pack_frame(frame_type, payload=b"", stream_id=0):
+    """Pack a V2 frame: magic(4) + version(1) + reserved(1) + type(2) + length(4) + stream_id(4) + payload"""
     magic = struct.pack("!I", FRAME_MAGIC)
     version = struct.pack("B", FRAME_VERSION)
     reserved = struct.pack("B", 0)
     ftype = struct.pack("!H", frame_type)
     length = struct.pack("!I", len(payload))
-    return magic + version + reserved + ftype + length + payload
+    sid = struct.pack("!I", stream_id)
+    return magic + version + reserved + ftype + length + sid + payload
 
 def unpack_frame_header(data):
-    """Unpack frame header (12 bytes)"""
-    if len(data) < 12:
+    """Unpack V2 frame header (16 bytes) -> (type, length, stream_id) or None"""
+    if len(data) < FRAME_HEADER_SIZE:
         return None
-    magic, version, reserved, ftype, length = struct.unpack("!IBBBHI", data[:12])
+    magic = struct.unpack("!I", data[0:4])[0]
+    version = data[4]
+    ftype = struct.unpack("!H", data[6:8])[0]
+    length = struct.unpack("!I", data[8:12])[0]
+    stream_id = struct.unpack("!I", data[12:16])[0]
     if magic != FRAME_MAGIC or version != FRAME_VERSION:
         return None
-    return ftype, length
+    return ftype, length, stream_id
 
 class MockTunnelClient:
     """Simulates a rift-client connecting to the tunnel port"""
@@ -58,20 +64,24 @@ class MockTunnelClient:
         print(f"  [Tunnel] Registered: {self.tunnel_id}")
     
     def wait_for_request(self, timeout=5):
-        """Wait for incoming frames until we get FRAME_DATA"""
+        """Wait for incoming frames until we get FRAME_DATA (V2: 16-byte header)"""
         self.sock.settimeout(timeout)
         try:
             while True:
-                header = self.sock.recv(12)
-                if len(header) < 12:
+                header = b""
+                while len(header) < FRAME_HEADER_SIZE:
+                    chunk = self.sock.recv(FRAME_HEADER_SIZE - len(header))
+                    if not chunk:
+                        return None
+                    header += chunk
+
+                parsed = unpack_frame_header(header)
+                if parsed is None:
+                    print(f"    [DEBUG] Bad frame header")
                     return None
-                
-                magic, version, reserved, ftype, length = struct.unpack("!IBBHI", header)
-                
-                if magic != FRAME_MAGIC or version != FRAME_VERSION:
-                    print(f"    [DEBUG] Bad frame: magic=0x{magic:08x}, version={version}")
-                    return None
-                
+
+                ftype, length, stream_id = parsed
+
                 payload = b""
                 while len(payload) < length:
                     chunk = self.sock.recv(length - len(payload))
@@ -80,17 +90,20 @@ class MockTunnelClient:
                     payload += chunk
                 
                 if ftype == FRAME_DATA:
+                    self.last_stream_id = stream_id
                     return payload.decode('utf-8', errors='replace')
                 elif ftype == FRAME_CONNECT_REQUEST:
+                    self.last_stream_id = stream_id
                     continue
                 else:
                     print(f"    [DEBUG] Unexpected frame type: {ftype}")
         except socket.timeout:
             return None
     
-    def send_response(self, data):
-        """Send response back through the tunnel"""
-        frame = pack_frame(FRAME_DATA, data.encode())
+    def send_response(self, data, stream_id=None):
+        """Send response back through the tunnel with stream_id"""
+        sid = stream_id if stream_id is not None else getattr(self, 'last_stream_id', 0)
+        frame = pack_frame(FRAME_DATA, data.encode(), sid)
         self.sock.sendall(frame)
     
     def close(self):

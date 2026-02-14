@@ -1,3 +1,52 @@
+# RIFT Changelog
+
+## v2.0 - Stream Multiplexing (February 15, 2026)
+
+**Problem:** V1's serial request handling caused head-of-line blocking. When a browser
+opened parallel connections (Portainer, heavy SPAs), requests would queue behind each
+other on the single tunnel TCP connection. Heavy pages timed out or hung.
+
+**Solution:** Added `stream_id` to the frame header (V2 protocol). Multiple browser
+requests now fly concurrently over one tunnel TCP connection, each identified by a
+unique stream_id.
+
+### Protocol Changes (V1 → V2)
+- Frame header: 12 → 16 bytes (added `stream_id` uint32_t field)
+- `FRAME_VERSION`: 1 → 2
+- `frame_read()` / `frame_write()` now take `stream_id` parameter
+- `FRAME_CLOSE` is per-stream, not per-connection
+
+### Server Changes
+- **connection.h**: Removed `CONN_TUNNEL_FORWARDING` and `CONN_PUBLIC_QUEUED` states.
+  Added `stream_entry_t`, `MAX_STREAMS_PER_TUNNEL=128`, stream map in `connection_t`.
+- **connection.c**: Replaced queue operations with stream map ops:
+  `tunnel_next_stream_id()`, `tunnel_add_stream()`, `tunnel_find_browser()`,
+  `tunnel_remove_stream()`, `tunnel_close_all_streams()`.
+- **handlers.c**: `handle_http_request()` assigns stream_id, registers in stream map,
+  sends CONNECT_REQUEST+DATA with stream_id. Removed `serve_next_pending()`.
+- **epoll_server.c**: Tunnel stays `CONN_TUNNEL_READY` always. Reads frames and demuxes
+  by stream_id. FRAME_CLOSE is per-stream. No CONN_TUNNEL_FORWARDING case.
+
+### Client Changes
+- **client/main.c**: Complete rewrite for stream multiplexing:
+  - Stream map (128 slots): `stream_add()`, `stream_find_fd()`, `stream_find_sid()`,
+    `stream_remove_by_sid()`, `stream_remove_by_fd()`, `stream_close_all()`
+  - FRAME_CONNECT_REQUEST opens new local connection per stream
+  - FRAME_DATA routed to correct local fd by stream_id
+  - Local fd data tagged with stream_id in outgoing frames
+  - Reconnection closes all streams cleanly
+
+### Documentation Updates
+- PROTOCOL.md updated to V2 specification
+- ARCHITECTURE.md updated for stream multiplexing design
+- FILES.md updated for new data structures and functions
+
+### Test Updates
+- test_tunnel.py updated for V2 16-byte frame format with stream_id
+- test_portainer.py updated for V2 client output
+
+---
+
 # RIFT CI/CD & Testing Setup - Summary
 
 **Date:** January 23, 2026  

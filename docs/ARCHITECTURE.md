@@ -72,29 +72,36 @@ Internet Browser          RIFT Server              Local Service
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Connection Object Structure
+### Connection Object Structure (V2)
 ```c
 typedef struct {
-    int fd;                      // Socket file descriptor
-    conn_state_t state;          // Current state (see state machine)
-    int peer_fd;                 // Linked connection fd
-    char tunnel_id[64];          // Unique tunnel identifier
-    char service_id[64];         // Requested service
+    uint32_t stream_id;              // Stream identifier
+    int      browser_fd;             // Linked browser socket
+} stream_entry_t;
+
+typedef struct {
+    int fd;                          // Socket file descriptor
+    conn_state_t state;              // TUNNEL_INIT/READY or PUBLIC_INIT/FORWARDING
+    int peer_fd;                     // Linked tunnel fd (for browsers)
+    char tunnel_id[64];              // Unique tunnel identifier
+    char service_id[64];             // Requested service
+    uint32_t stream_id;              // Browser's assigned stream (PUBLIC_FORWARDING)
+    stream_entry_t streams[128];     // Stream map (TUNNEL_READY only)
+    int stream_count;                // Active stream count
 } connection_t;
 ```
 
-### Connection State Machine
+### Connection State Machine (V2)
 ```
 Tunnel Connections:
     TUNNEL_INIT ──[FRAME_REGISTER_TUNNEL]──> TUNNEL_READY
-                                                    ▲
                                                     │
-                                        [Public connected]
-                                                    │
-                                        [Public disconnected]
+                                         (stays here permanently)
+                                         (concurrent streams via stream_map)
 
 Public Connections:
-    PUBLIC_INIT ──[Parse HTTP Host]──> PUBLIC_FORWARDING ──[Peer closes]──> CLOSED
+    PUBLIC_INIT ──[Parse HTTP Host]──> PUBLIC_FORWARDING ──[EOF/error]──> CLOSED
+                                      (carries stream_id)
 ```
 
 ---
@@ -226,24 +233,25 @@ while (!should_shutdown) {
 2. FRAME_READ (expects FRAME_REGISTER_TUNNEL)
    └─> Store tunnel_id
    └─> State = TUNNEL_READY
-   └─> Connection persists, waits for public requests
+   └─> Connection persists, stream_map ready
 
-3. PUBLIC CONNECTS
-   └─> connection_bind(public_fd, tunnel_fd)
-   └─> Send FRAME_CONNECT_REQUEST to tunnel
-   └─> State = TUNNEL_READY (unchanged)
+3. PUBLIC CONNECTS (can happen concurrently)
+   └─> Assign stream_id = tunnel_next_stream_id()
+   └─> tunnel_add_stream(stream_id, browser_fd)
+   └─> Send FRAME_CONNECT_REQUEST(stream_id) + FRAME_DATA(stream_id)
+   └─> Tunnel stays in TUNNEL_READY (unchanged)
 
-4. DATA FLOW
-   Public → Server → Frame → Tunnel → Client
-   Client → Frame → Server → Public → Browser
+4. DATA FLOW (multiplexed)
+   Browser → Server → FRAME_DATA(stream_id) → Tunnel → Client
+   Client  → FRAME_DATA(stream_id) → Server demux → Browser
 
-5. PUBLIC CLOSES
-   └─> Unlink peer_fd
-   └─> Tunnel remains TUNNEL_READY
-   └─> Connection can accept new public requests
+5. ONE BROWSER CLOSES
+   └─> tunnel_remove_stream(stream_id)
+   └─> Send FRAME_CLOSE(stream_id) to tunnel
+   └─> Other streams continue unaffected
 
 6. TUNNEL CLOSES (client disconnect)
-   └─> Close any linked public connection
+   └─> tunnel_close_all_streams() → 502 to all browsers
    └─> connection_close(tunnel_fd)
    └─> epoll_ctl(DEL, fd)
    └─> close(fd)
@@ -264,25 +272,27 @@ while (!should_shutdown) {
    ├─ From Host header: "tunnel-123.rift.local"
    └─ From X-Tunnel-Id header: "tunnel-123"
 
-4. FIND TUNNEL
+4. FIND TUNNEL & ASSIGN STREAM
    └─> connection_find_tunnel(tunnel_id)
    └─> Must be in TUNNEL_READY state
-   └─> Must NOT have existing peer_fd
+   └─> Assign stream_id = tunnel_next_stream_id()
+   └─> tunnel_add_stream(stream_id, browser_fd)
 
-5. BIND
-   └─> connection_bind(public_fd, tunnel_fd)
+5. FORWARD
    └─> State = PUBLIC_FORWARDING
-   └─> Send FRAME_CONNECT_REQUEST to tunnel
-   └─> Tunnel client opens local service
+   └─> browser.stream_id = assigned stream
+   └─> Send FRAME_CONNECT_REQUEST(stream_id) + FRAME_DATA(stream_id)
+   └─> Client opens local service, forwards per stream_id
 
-6. FORWARD DATA
-   Public:  read() → write() [as FRAME_DATA] → Tunnel
-   Tunnel:  FRAME_DATA → write() [raw bytes] → Public
+6. DATA FLOW
+   Browser read → frame_write(FRAME_DATA, stream_id) → Tunnel
+   Tunnel FRAME_DATA(stream_id) → demux → write to this browser
 
 7. CLOSE
    └─> Browser closes or error occurs
-   └─> Unlink peer_fd from tunnel
-   └─> Tunnel stays TUNNEL_READY for next request
+   └─> tunnel_remove_stream(stream_id)
+   └─> Send FRAME_CLOSE(stream_id) to tunnel
+   └─> Tunnel stays READY for other streams
 ```
 
 ---

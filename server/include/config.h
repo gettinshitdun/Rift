@@ -13,8 +13,8 @@
 #define CONFIG_SERVICE_ID_MAX 64
 
 #define CONFIG_FRAME_MAX_PAYLOAD 16384
-#define CONFIG_FRAME_HEADER_SIZE 12
-#define CONFIG_FRAME_VERSION 1
+#define CONFIG_FRAME_HEADER_SIZE 16
+#define CONFIG_FRAME_VERSION 2
 #define CONFIG_FRAME_MAGIC 0x52494654
 
 #define CONFIG_EPOLL_MAX_EVENTS 64
@@ -105,8 +105,8 @@
 /* ===== Compile-Time Assertions ===== */
 
 /* Ensure frame header size matches struct definition */
-#if CONFIG_FRAME_HEADER_SIZE != 12
-#error "CONFIG_FRAME_HEADER_SIZE must be 12 (sizeof(frame_header_t))"
+#if CONFIG_FRAME_HEADER_SIZE != 16
+#error "CONFIG_FRAME_HEADER_SIZE must be 16 (sizeof(frame_header_t) with stream_id)"
 #endif
 
 /* Ensure frame size is reasonable */
