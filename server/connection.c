@@ -226,9 +226,15 @@ int connection_frame_read(connection_t *c, frame_type_t *type,
     if (magic != FRAME_MAGIC) {
         fprintf(stderr, "[frame] Magic mismatch: got 0x%08x, expected 0x%08x\n",
                 magic, FRAME_MAGIC);
-        /* Try to resync: skip one byte */
+        fprintf(stderr, "[frame] rbuf_len=%zu, first 32 bytes:", c->rbuf_len);
+        for (size_t i = 0; i < c->rbuf_len && i < 32; ++i) fprintf(stderr, " %02x", (unsigned char)c->rbuf[i]);
+        fprintf(stderr, "\n");
+        // Try to resync: skip one byte
         memmove(c->rbuf, c->rbuf + 1, c->rbuf_len - 1);
         c->rbuf_len--;
+        fprintf(stderr, "[frame] After memmove, rbuf_len=%zu, first 32 bytes:", c->rbuf_len);
+        for (size_t i = 0; i < c->rbuf_len && i < 32; ++i) fprintf(stderr, " %02x", (unsigned char)c->rbuf[i]);
+        fprintf(stderr, "\n");
         errno = EBADMSG;
         return -1;
     }

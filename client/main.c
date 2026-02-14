@@ -522,12 +522,16 @@ int main(int argc, char *argv[]) {
                                 if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT) {
                                     LOG("Server backpressure on stream %u, pausing", sid);
                                     break;
-                                } else if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) {
-                                    ERR("Server connection lost during write");
-                                    break;
                                 } else {
-                                    ERR("Send to server failed: %s", strerror(errno));
-                                    goto cleanup;
+                                    ERR("Server connection lost during write: %s", strerror(errno));
+                                    epoll_ctl(epfd, EPOLL_CTL_DEL, server_fd, NULL);
+                                    close(server_fd);
+                                    server_fd = reconnect_to_server(server_ip, server_port, tunnel_id, epfd);
+                                    if (server_fd < 0) {
+                                        ERR("Failed to reconnect, shutting down");
+                                        goto cleanup;
+                                    }
+                                    break;
                                 }
                             }
                         } else if (n < 0) {
