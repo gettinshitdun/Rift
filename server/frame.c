@@ -88,7 +88,7 @@ static int read_full(int fd, void *buf, size_t len) {
     return 0;
 }
 
-int frame_read(int fd, frame_type_t *type, char *payload, uint32_t *len) {
+int frame_read(int fd, frame_type_t *type, char *payload, uint32_t *len, uint32_t *stream_id) {
     frame_header_t hdr;
     if (read_full(fd, &hdr, sizeof(hdr)) < 0)
         return -1;
@@ -97,6 +97,7 @@ int frame_read(int fd, frame_type_t *type, char *payload, uint32_t *len) {
     uint8_t version = hdr.version;
     uint16_t h_type = ntohs(hdr.type);
     uint32_t h_len = ntohl(hdr.length);
+    uint32_t h_sid = ntohl(hdr.stream_id);
 
     if (magic != FRAME_MAGIC) {
         fprintf(stderr, "[frame] Magic mismatch: got 0x%08x, expected 0x%08x\n", magic, FRAME_MAGIC);
@@ -123,10 +124,11 @@ int frame_read(int fd, frame_type_t *type, char *payload, uint32_t *len) {
 
     *type = (frame_type_t)h_type;
     *len = h_len;
+    *stream_id = h_sid;
     return 0;
 }
 
-int frame_write(int fd, frame_type_t type, const char *payload, uint32_t len) {
+int frame_write(int fd, frame_type_t type, const char *payload, uint32_t len, uint32_t stream_id) {
     if (len > FRAME_MAX_PAYLOAD) {
         fprintf(stderr, "[frame] Payload too large to send: %u (max %u)\n", len, FRAME_MAX_PAYLOAD);
         errno = EMSGSIZE;
@@ -139,6 +141,7 @@ int frame_write(int fd, frame_type_t type, const char *payload, uint32_t len) {
     hdr.reserved = 0;
     hdr.type = htons((uint16_t)type);
     hdr.length = htonl(len);
+    hdr.stream_id = htonl(stream_id);
 
     // Combine header + payload into a single buffer for atomic write.
     // Prevents protocol desync if connection drops between two separate writes.

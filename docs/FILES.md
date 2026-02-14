@@ -122,7 +122,7 @@ Generated (not committed):
 - Scalability limits
 
 #### **docs/PROTOCOL.md** (566 lines)
-- Binary frame format (12-byte header specification)
+- Binary frame format (16-byte V2 header specification)
 - All 6 frame types:
   - FRAME_REGISTER_TUNNEL (0x0001)
   - FRAME_CONNECT_REQUEST (0x0002)
@@ -130,11 +130,12 @@ Generated (not committed):
   - FRAME_ERROR (0x0004)
   - FRAME_CLOSE (0x0005)
   - FRAME_ACK (0x0006) - reserved
+- Stream multiplexing design (V2)
 - Complete state machines with timelines
-- Example message sequences (3 detailed scenarios)
+- Example message sequences (concurrent requests)
 - Error handling strategies
 - Wire format examples (hex dumps)
-- Protocol versioning for forward compatibility
+- Protocol versioning (V1 → V2 migration)
 
 #### **docs/LEARNINGS.md** (645 lines)
 - Engineering principles & design philosophy
@@ -213,7 +214,8 @@ Generated (not committed):
 - `CONFIG_HEALTH_PORT = 8080`
 - `CONFIG_MAX_CONNECTIONS = 102400`
 - `CONFIG_FRAME_MAX_PAYLOAD = 16384`
-- `CONFIG_FRAME_VERSION = 1`
+- `CONFIG_FRAME_VERSION = 2`
+- `CONFIG_FRAME_HEADER_SIZE = 16`
 - `CONFIG_EPOLL_MAX_EVENTS = 64`
 
 **Why:** Removes hardcoded magic numbers, enables tuning without recompilation
@@ -223,36 +225,44 @@ Generated (not committed):
 
 **Defines:**
 - `FRAME_MAGIC = 0x52494654` ("RIFT")
-- `FRAME_VERSION = 1`
+- `FRAME_VERSION = 2`
 - `FRAME_MAX_PAYLOAD = 16384`
 - Frame types enum (0-6)
-- `frame_header_t` struct (packed, 12 bytes)
+- `frame_header_t` struct (packed, 16 bytes — includes stream_id)
 
 **Functions:**
-- `frame_read()` - Read frame from socket
-- `frame_write()` - Write frame to socket
+- `frame_read(fd, type, payload, len, stream_id)` - Read V2 frame
+- `frame_write(fd, type, payload, len, stream_id)` - Write V2 frame
 
 #### **server/include/connection.h**
 **Purpose:** Connection state machine types
 
 **Types:**
-- `conn_state_t` enum (4 states)
+- `conn_state_t` enum (4 states: TUNNEL_INIT, TUNNEL_READY, PUBLIC_INIT, PUBLIC_FORWARDING)
+- `stream_entry_t` struct: { stream_id, browser_fd }
 - `connection_t` struct:
   - `fd` - Socket file descriptor
   - `state` - Current state
-  - `peer_fd` - Linked connection
+  - `peer_fd` - Linked tunnel fd (for browsers)
   - `tunnel_id[64]` - Tunnel identifier
   - `service_id[64]` - Service identifier
+  - `stream_id` - Browser's assigned stream (PUBLIC_FORWARDING)
+  - `streams[128]` - Stream map (TUNNEL_READY only)
+  - `stream_count` - Active stream count
 
 **Functions:**
 - `connection_init()` - Initialize connection table
 - `connection_alloc()` - Allocate slot
 - `connection_get()` - Find by fd
-- `connection_bind()` - Link tunnel ↔ public
-- `connection_close()` - Graceful close with cleanup
+- `connection_close()` - Graceful close with stream cleanup
 - `connection_find_tunnel()` - Search by tunnel_id
+- `tunnel_next_stream_id()` - Assign unique stream ID
+- `tunnel_add_stream()` - Register stream_id ↔ browser_fd
+- `tunnel_find_browser()` - Find browser by stream_id
+- `tunnel_remove_stream()` - Remove one stream
+- `tunnel_close_all_streams()` - Close all streams (tunnel dies)
 
-**Key Design:** 102,400 pre-allocated slots (14 MB) for O(1) operations
+**Key Design:** 102,400 pre-allocated slots. Stream map per tunnel (128 max concurrent).
 
 #### **server/include/handlers.h**
 **Purpose:** Protocol handler declarations
@@ -402,32 +412,35 @@ int main() {
 ### Client Implementation Files
 
 #### **client/main.c**
-**Purpose:** Tunnel client (exposes local service)
+**Purpose:** Tunnel client (exposes local service) with V2 stream multiplexing
 
 **Components:**
 1. Random tunnel ID generation (adjective-noun-number)
 2. TCP connection to server
-3. RIFT frame registration
-4. epoll event loop (similar to server)
-5. **Buffered frame reader:**
-   - Accumulates data in 16KB buffer
+3. RIFT V2 frame registration (stream_id=0)
+4. epoll event loop with stream demuxing
+5. **Buffered frame reader (V2):**
+   - Accumulates data in buffer
    - Handles TCP fragmentation
-   - Prevents "magic mismatch" errors
-6. Local service connection
-7. Bidirectional forwarding
+   - Parses 16-byte V2 header with stream_id
+6. **Stream map** (128 slots: stream_id ↔ local_fd)
+7. Multiple concurrent local service connections
+8. Bidirectional forwarding per stream
 
 **Key Features:**
+- Stream multiplexing: concurrent browser requests
 - Frame buffering for partial TCP packets
-- Persistent local connections
-- Graceful shutdown on server close
+- Per-stream local connections
+- Graceful reconnection with stream_close_all()
 - Detailed error logging
 
 **State:**
-- TUNNEL_INIT → Connects to server
-- Sends FRAME_REGISTER_TUNNEL
-- LISTENING → Waits for FRAME_CONNECT_REQUEST
-- Opens local connection (localhost:port)
-- FORWARDING → Bidirectional data transfer
+- Connects to server, sends FRAME_REGISTER_TUNNEL(stream_id=0)
+- Enters multiplexed event loop
+- FRAME_CONNECT_REQUEST(stream=N) → open local conn, stream_add(N, fd)
+- FRAME_DATA(stream=N) → route to matching local_fd
+- FRAME_CLOSE(stream=N) → close that local_fd
+- Local fd EOF → FRAME_CLOSE(stream=N) to server
 
 ---
 
@@ -561,7 +574,7 @@ client/main.c
 
 ---
 
-**Last Updated:** January 23, 2026  
-**RIFT Version:** 1.0  
-**Total Documentation:** 2,300+ lines  
+**Last Updated:** February 15, 2026  
+**RIFT Version:** 2.0 (stream multiplexing)  
+**Total Documentation:** 2,500+ lines  
 **Code Quality:** Production-Grade

@@ -42,7 +42,7 @@ for _ in range(30):
     print(f"  {line.rstrip()}")
     m = re.search(r'Tunnel ID:\s+(\S+)', line)
     if m: tunnel_id = m.group(1)
-    if 'Event loop started' in line: break
+    if 'Event loop started' in line or 'stream multiplexing' in line: break
 
 if not tunnel_id:
     print("ERROR: Could not extract tunnel ID")

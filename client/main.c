@@ -12,11 +12,14 @@
 
 #include "../server/include/frame.h"
 
-#define MAX_EVENTS 10
+#define MAX_EVENTS 64
 #define DEFAULT_SERVER_IP "43.205.120.186"
 #define DEFAULT_SERVER_PORT 7000
 #define MAX_RECONNECT_ATTEMPTS 5
 #define RECONNECT_DELAY_BASE 2  // seconds
+
+/* Maximum concurrent streams (matches server) */
+#define MAX_STREAMS 128
 
 // Global verbose flag
 static int verbose = 0;
@@ -24,6 +27,64 @@ static int verbose = 0;
 #define LOG(fmt, ...) do { if (verbose) fprintf(stderr, "[LOG] " fmt "\n", ##__VA_ARGS__); } while(0)
 #define WARN(fmt, ...) fprintf(stderr, "[WARN] " fmt "\n", ##__VA_ARGS__)
 #define ERR(fmt, ...) fprintf(stderr, "[ERROR] " fmt "\n", ##__VA_ARGS__)
+
+/* ---- Stream map: stream_id <-> local_fd ---- */
+typedef struct {
+    uint32_t stream_id;
+    int      local_fd;
+} stream_map_entry_t;
+
+static stream_map_entry_t stream_map[MAX_STREAMS];
+static int stream_count = 0;
+
+static int stream_add(uint32_t sid, int local_fd) {
+    if (stream_count >= MAX_STREAMS) return -1;
+    stream_map[stream_count].stream_id = sid;
+    stream_map[stream_count].local_fd = local_fd;
+    stream_count++;
+    return 0;
+}
+
+static int stream_find_fd(uint32_t sid) {
+    for (int i = 0; i < stream_count; i++)
+        if (stream_map[i].stream_id == sid) return stream_map[i].local_fd;
+    return -1;
+}
+
+static uint32_t stream_find_sid(int local_fd) {
+    for (int i = 0; i < stream_count; i++)
+        if (stream_map[i].local_fd == local_fd) return stream_map[i].stream_id;
+    return 0;
+}
+
+static void stream_remove_by_sid(uint32_t sid) {
+    for (int i = 0; i < stream_count; i++) {
+        if (stream_map[i].stream_id == sid) {
+            stream_map[i] = stream_map[stream_count - 1];
+            stream_count--;
+            return;
+        }
+    }
+}
+
+static void stream_remove_by_fd(int local_fd) {
+    for (int i = 0; i < stream_count; i++) {
+        if (stream_map[i].local_fd == local_fd) {
+            stream_map[i] = stream_map[stream_count - 1];
+            stream_count--;
+            return;
+        }
+    }
+}
+
+static void stream_close_all(int epfd) {
+    for (int i = 0; i < stream_count; i++) {
+        int lfd = stream_map[i].local_fd;
+        epoll_ctl(epfd, EPOLL_CTL_DEL, lfd, NULL);
+        close(lfd);
+    }
+    stream_count = 0;
+}
 
 // Reliable write: retries on partial writes and EAGAIN
 static int write_all(int fd, const char *buf, size_t len) {
@@ -47,7 +108,7 @@ static int write_all(int fd, const char *buf, size_t len) {
 }
 
 typedef struct {
-    char buf[FRAME_MAX_PAYLOAD + 16];
+    char buf[FRAME_MAX_PAYLOAD + 20];  /* 16-byte header + payload */
     size_t len;
 } frame_buffer_t;
 
@@ -131,7 +192,7 @@ int tcp_connect(const char* ip, int port) {
     return fd;
 }
 
-int frame_read_buffered(int fd, frame_type_t *type, char *payload, uint32_t *len) {
+int frame_read_buffered(int fd, frame_type_t *type, char *payload, uint32_t *len, uint32_t *stream_id) {
     while (frame_buf.len < sizeof(frame_buf.buf)) {
         ssize_t n = read(fd, frame_buf.buf + frame_buf.len, sizeof(frame_buf.buf) - frame_buf.len);
         if (n > 0) {
@@ -158,6 +219,7 @@ int frame_read_buffered(int fd, frame_type_t *type, char *payload, uint32_t *len
     uint8_t version = hdr->version;
     uint16_t h_type = ntohs(hdr->type);
     uint32_t h_len = ntohl(hdr->length);
+    uint32_t h_sid = ntohl(hdr->stream_id);
 
     if (magic != FRAME_MAGIC) {
         fprintf(stderr, "[frame] Magic mismatch: got 0x%08x, expected 0x%08x\n", magic, FRAME_MAGIC);
@@ -190,6 +252,7 @@ int frame_read_buffered(int fd, frame_type_t *type, char *payload, uint32_t *len
     // Extract the frame data
     *type = (frame_type_t)h_type;
     *len = h_len;
+    *stream_id = h_sid;
     if (h_len > 0) {
         memcpy(payload, frame_buf.buf + sizeof(frame_header_t), h_len);
     }
@@ -202,6 +265,9 @@ int frame_read_buffered(int fd, frame_type_t *type, char *payload, uint32_t *len
 }
 
 int reconnect_to_server(const char *server_ip, int server_port, const char *tunnel_id, int epfd) {
+    // Close all active local streams before reconnecting
+    stream_close_all(epfd);
+
     for (int attempt = 1; attempt <= MAX_RECONNECT_ATTEMPTS; attempt++) {
         LOG("Reconnection attempt %d/%d to server %s:%d", attempt, MAX_RECONNECT_ATTEMPTS, server_ip, server_port);
         
@@ -218,9 +284,9 @@ int reconnect_to_server(const char *server_ip, int server_port, const char *tunn
         
         LOG("Reconnected to server, fd=%d", server_fd);
         
-        // Send registration frame
+        // Send registration frame (stream_id=0 for control frames)
         LOG("Re-registering tunnel: %s", tunnel_id);
-        if (frame_write(server_fd, FRAME_REGISTER_TUNNEL, tunnel_id, (uint32_t)strlen(tunnel_id)) < 0) {
+        if (frame_write(server_fd, FRAME_REGISTER_TUNNEL, tunnel_id, (uint32_t)strlen(tunnel_id), 0) < 0) {
             ERR("Failed to re-register tunnel on attempt %d", attempt);
             close(server_fd);
             if (attempt < MAX_RECONNECT_ATTEMPTS) {
@@ -300,7 +366,7 @@ int main(int argc, char *argv[]) {
     char tunnel_id[64];
     generate_random_id(tunnel_id, sizeof(tunnel_id));
 
-    printf("\n--- RIFT CLIENT v1 ---\n");
+    printf("\n--- RIFT CLIENT v2 (stream multiplex) ---\n");
     printf("Forwarding: localhost:%d <---> Rift Server\n", local_port);
     printf("Tunnel ID:  %s\n", tunnel_id);
     printf("\n📡 Public URLs:\n");
@@ -315,15 +381,15 @@ int main(int argc, char *argv[]) {
     }
     LOG("Connected to server, fd=%d", server_fd);
 
+    // Register tunnel (stream_id=0 for control frames)
     LOG("Sending registration frame for tunnel: %s", tunnel_id);
-    if (frame_write(server_fd, FRAME_REGISTER_TUNNEL, tunnel_id, (uint32_t)strlen(tunnel_id)) < 0) {
+    if (frame_write(server_fd, FRAME_REGISTER_TUNNEL, tunnel_id, (uint32_t)strlen(tunnel_id), 0) < 0) {
         ERR("Failed to send registration frame");
         close(server_fd);
         return 1;
     }
     LOG("Registration successful");
 
-    int local_fd = -1;
     int epfd = epoll_create1(0);
     if (epfd < 0) {
         perror("epoll_create1");
@@ -337,7 +403,7 @@ int main(int argc, char *argv[]) {
     ev.data.fd = server_fd;
     epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &ev);
 
-    LOG("Event loop started");
+    LOG("Event loop started (stream multiplexing mode)");
     while (1) {
         int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
         if (nfds < 0) {
@@ -346,44 +412,32 @@ int main(int argc, char *argv[]) {
             break;
         }
 
-        LOG("epoll returned %d events", nfds);
         for (int i = 0; i < nfds; i++) {
             uint32_t revents = events[i].events;
             int fd = events[i].data.fd;
 
             if (revents & EPOLLIN) {
                 if (fd == server_fd) {
-                    // Read all available frames from server using buffered reader
+                    // ── Read frames from the tunnel server ──
                     while (1) {
                         frame_type_t type;
                         char payload[FRAME_MAX_PAYLOAD];
                         uint32_t len;
+                        uint32_t stream_id;
 
-                        int res = frame_read_buffered(server_fd, &type, payload, &len);
+                        int res = frame_read_buffered(server_fd, &type, payload, &len, &stream_id);
                         if (res < 0) {
                             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EPROTO || errno == EBADMSG) {
-                                LOG("No more frames available");
-                                break;
+                                break;  // No more complete frames
                             }
                             if (errno == ECONNRESET || errno == EPIPE) {
                                 ERR("Server connection lost: %s", strerror(errno));
-                                
-                                // Remove old server fd from epoll
                                 epoll_ctl(epfd, EPOLL_CTL_DEL, server_fd, NULL);
                                 close(server_fd);
-                                
-                                // Close any existing local connection
-                                if (local_fd > 0) {
-                                    LOG("Closing local connection during reconnection");
-                                    epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
-                                    close(local_fd);
-                                    local_fd = -1;
-                                }
-                                
-                                // Attempt to reconnect
+
                                 server_fd = reconnect_to_server(server_ip, server_port, tunnel_id, epfd);
                                 if (server_fd < 0) {
-                                    ERR("Failed to reconnect to server, shutting down");
+                                    ERR("Failed to reconnect, shutting down");
                                     goto cleanup;
                                 }
                                 break;
@@ -391,96 +445,105 @@ int main(int argc, char *argv[]) {
                             WARN("Frame read error: %s (continuing)", strerror(errno));
                             break;
                         }
-                        LOG("Frame received: type=%d, len=%u", type, len);
 
-                        // Process the frame
+                        LOG("Frame: type=%d len=%u stream=%u", type, len, stream_id);
+
                         if (type == FRAME_CONNECT_REQUEST) {
-                            LOG("FRAME_CONNECT_REQUEST received");
-                            // Close existing local connection if any
-                            if (local_fd > 0) {
-                                LOG("Closing existing local connection fd=%d", local_fd);
-                                epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
-                                close(local_fd);
+                            // ── New browser request → open a fresh local connection ──
+                            LOG("CONNECT_REQUEST stream=%u", stream_id);
+
+                            int lfd = tcp_connect("127.0.0.1", local_port);
+                            if (lfd < 0) {
+                                ERR("Cannot connect to local service for stream %u: %s",
+                                    stream_id, strerror(errno));
+                                // Notify server this stream failed
+                                frame_write(server_fd, FRAME_CLOSE, "local_failed", 12, stream_id);
+                                continue;
                             }
 
-                            // Connect to local service
-                            LOG("Connecting to local service on port %d", local_port);
-                            local_fd = tcp_connect("127.0.0.1", local_port);
-                            if (local_fd > 0) {
-                                LOG("Local connection established fd=%d", local_fd);
-                                struct epoll_event lev = {.events = EPOLLIN, .data.fd = local_fd};
-                                epoll_ctl(epfd, EPOLL_CTL_ADD, local_fd, &lev);
-                            } else {
-                                ERR("Failed to connect to local service: %s", strerror(errno));
+                            if (stream_add(stream_id, lfd) < 0) {
+                                ERR("Stream map full, rejecting stream %u", stream_id);
+                                close(lfd);
+                                frame_write(server_fd, FRAME_CLOSE, "stream_limit", 12, stream_id);
+                                continue;
                             }
+
+                            struct epoll_event lev = {.events = EPOLLIN, .data.fd = lfd};
+                            epoll_ctl(epfd, EPOLL_CTL_ADD, lfd, &lev);
+                            LOG("Stream %u → local fd=%d", stream_id, lfd);
                         }
                         else if (type == FRAME_DATA) {
-                            if (local_fd > 0) {
-                                if (write_all(local_fd, payload, len) < 0) {
-                                    ERR("Write to local service failed: %s", strerror(errno));
-                                    epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
-                                    close(local_fd);
-                                    local_fd = -1;
-                                }
-                            } else {
-                                WARN("Dropped %u bytes (no local connection)", len);
+                            // ── Forward data to the matching local connection ──
+                            int lfd = stream_find_fd(stream_id);
+                            if (lfd < 0) {
+                                WARN("DATA for unknown stream %u, dropping %u bytes", stream_id, len);
+                                continue;
+                            }
+                            if (write_all(lfd, payload, len) < 0) {
+                                ERR("Write to local fd=%d (stream %u) failed: %s",
+                                    lfd, stream_id, strerror(errno));
+                                epoll_ctl(epfd, EPOLL_CTL_DEL, lfd, NULL);
+                                close(lfd);
+                                stream_remove_by_sid(stream_id);
+                                frame_write(server_fd, FRAME_CLOSE, "write_error", 11, stream_id);
                             }
                         }
                         else if (type == FRAME_CLOSE) {
-                            LOG("FRAME_CLOSE received from server");
-                            if (local_fd > 0) {
-                                LOG("Closing local connection due to server FRAME_CLOSE");
-                                epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
-                                close(local_fd);
-                                local_fd = -1;
+                            // ── Server closed one stream (browser disconnected) ──
+                            LOG("CLOSE stream=%u", stream_id);
+                            int lfd = stream_find_fd(stream_id);
+                            if (lfd >= 0) {
+                                epoll_ctl(epfd, EPOLL_CTL_DEL, lfd, NULL);
+                                close(lfd);
                             }
-                            // Check if this is a browser cancellation vs tunnel shutdown
-                            if (len > 0 && strncmp(payload, "browser_cancelled", 17) == 0) {
-                                LOG("Browser request was cancelled, ready for next request");
-                                // Don't shutdown client - just reset and wait for next request
-                            }
+                            stream_remove_by_sid(stream_id);
                         }
                         else {
-                            fprintf(stderr, "[!] Unknown frame type: %d\n", type);
+                            WARN("Unknown frame type %d on stream %u", type, stream_id);
                         }
                     }
                 }
-                else if (fd == local_fd) {
-                    // Read all available data from local service
+                else {
+                    // ── Data from a local service connection → send to server ──
+                    uint32_t sid = stream_find_sid(fd);
+                    if (sid == 0) {
+                        // Stale fd – not in stream map anymore
+                        WARN("Data on unknown local fd=%d, removing", fd);
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                        close(fd);
+                        continue;
+                    }
+
                     char buffer[FRAME_MAX_PAYLOAD];
                     while (1) {
-                        ssize_t n = read(local_fd, buffer, sizeof(buffer));
+                        ssize_t n = read(fd, buffer, sizeof(buffer));
                         if (n > 0) {
-                            if (frame_write(server_fd, FRAME_DATA, buffer, (uint32_t)n) < 0) {
+                            if (frame_write(server_fd, FRAME_DATA, buffer, (uint32_t)n, sid) < 0) {
                                 if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT) {
-                                    // Server backpressure — stop reading from local for now.
-                                    // epoll will wake us again when local_fd has data.
-                                    LOG("Server backpressure (write returned %s), pausing local reads",
-                                        strerror(errno));
+                                    LOG("Server backpressure on stream %u, pausing", sid);
                                     break;
                                 } else if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) {
-                                    ERR("Server connection lost: %s", strerror(errno));
-                                    LOG("Server connection lost during write, will reconnect on next epoll event");
+                                    ERR("Server connection lost during write");
                                     break;
                                 } else {
-                                    ERR("Failed to send to server: %s", strerror(errno));
+                                    ERR("Send to server failed: %s", strerror(errno));
                                     goto cleanup;
                                 }
                             }
                         } else if (n < 0) {
                             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                                break; // No more data
+                                break;  // No more data right now
                             }
-                            perror("[!] Read error from local service");
+                            ERR("Read error from local fd=%d (stream %u): %s",
+                                fd, sid, strerror(errno));
                             break;
                         } else {
-                            // Connection closed - send FRAME_CLOSE to notify server
-                            if (frame_write(server_fd, FRAME_CLOSE, NULL, 0) < 0) {
-                                WARN("Failed to notify server of close: %s", strerror(errno));
-                            }
-                            epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
-                            close(local_fd);
-                            local_fd = -1;
+                            // Local connection closed – tell server to close the stream
+                            LOG("Local fd=%d closed (stream %u)", fd, sid);
+                            frame_write(server_fd, FRAME_CLOSE, NULL, 0, sid);
+                            epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                            close(fd);
+                            stream_remove_by_fd(fd);
                             break;
                         }
                     }
@@ -488,49 +551,35 @@ int main(int argc, char *argv[]) {
             }
 
             if (revents & (EPOLLHUP | EPOLLERR)) {
-                LOG("EPOLLHUP|EPOLLERR on fd=%d (EPOLLHUP=%s EPOLLERR=%s)", fd,
-                    (revents & EPOLLHUP) ? "yes" : "no",
-                    (revents & EPOLLERR) ? "yes" : "no");
                 if (fd == server_fd) {
                     ERR("Server connection lost (EPOLL event)");
-                    
-                    // Remove old server fd from epoll
                     epoll_ctl(epfd, EPOLL_CTL_DEL, server_fd, NULL);
                     close(server_fd);
-                    
-                    // Close any existing local connection
-                    if (local_fd > 0) {
-                        LOG("Closing local connection during reconnection");
-                        epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
-                        close(local_fd);
-                        local_fd = -1;
-                    }
-                    
-                    // Attempt to reconnect
+
                     server_fd = reconnect_to_server(server_ip, server_port, tunnel_id, epfd);
                     if (server_fd < 0) {
-                        ERR("Failed to reconnect to server, shutting down");
+                        ERR("Failed to reconnect, shutting down");
                         goto cleanup;
                     }
-                } else if (fd == local_fd) {
-                    LOG("Local connection closed");
-                    epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
-                    close(local_fd);
-                    local_fd = -1;
+                } else {
+                    // A local connection hung up
+                    uint32_t sid = stream_find_sid(fd);
+                    LOG("Local fd=%d HUP/ERR (stream %u)", fd, sid);
+                    if (sid != 0) {
+                        frame_write(server_fd, FRAME_CLOSE, NULL, 0, sid);
+                        stream_remove_by_fd(fd);
+                    }
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                    close(fd);
                 }
             }
         }
     }
 
 cleanup:
-    LOG("Cleanup: closing connections");
-    LOG("Closing server_fd=%d", server_fd);
+    LOG("Cleanup: closing all streams and connections");
+    stream_close_all(epfd);
     close(server_fd);
-    if (local_fd > 0) {
-        LOG("Closing local_fd=%d", local_fd);
-        close(local_fd);
-    }
-    LOG("Closing epfd=%d", epfd);
     close(epfd);
     LOG("Shutdown complete");
     return 0;

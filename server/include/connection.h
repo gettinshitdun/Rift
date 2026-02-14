@@ -7,50 +7,50 @@
 #define MAX_CONNECTIONS 102400
 #define ID_LEN 64
 
+/* Maximum concurrent streams (browser connections) per tunnel */
+#define MAX_STREAMS_PER_TUNNEL 128
+
 typedef enum {
     CONN_TUNNEL_INIT,
-    CONN_TUNNEL_READY,
-    CONN_TUNNEL_FORWARDING,
+    CONN_TUNNEL_READY,       /* Tunnel registered, can accept streams */
     CONN_PUBLIC_INIT,
-    CONN_PUBLIC_FORWARDING,
-    CONN_PUBLIC_QUEUED,
+    CONN_PUBLIC_FORWARDING,  /* Browser linked to a stream on a tunnel */
 } conn_state_t;
+
+/* Stream map entry: stream_id <-> browser_fd */
+typedef struct {
+    uint32_t stream_id;
+    int      browser_fd;
+} stream_entry_t;
 
 typedef struct {
     int fd;
     conn_state_t state;
-    int peer_fd;
+    int peer_fd;              /* For browsers: tunnel_fd.  For tunnels: unused (0) */
+    uint32_t stream_id;      /* For browsers: which stream they are on */
     char tunnel_id[ID_LEN];
     char service_id[ID_LEN];
+
+    /* Stream map — only used by tunnel connections */
+    stream_entry_t streams[MAX_STREAMS_PER_TUNNEL];
+    int stream_count;
 } connection_t;
-
-/* Pending request queue — holds browser requests while tunnel is busy */
-#define MAX_PENDING_PER_TUNNEL 64
-#define PENDING_REQUEST_MAX 16384
-
-typedef struct {
-    int fd;
-    char request[PENDING_REQUEST_MAX];
-    size_t request_len;
-} pending_request_t;
 
 void connection_init(void);
 void connection_add_tunnel(int fd);
 void connection_add_public(int fd);
 connection_t* connection_get(int fd);
-void connection_bind(int fd1, int fd2);
 void connection_close(int epfd, int fd);
 int  connection_active_count(void);
+
+/* Find a READY tunnel by tunnel_id */
 connection_t* connection_find_tunnel(const char *tunnel_id);
-connection_t* connection_find_tunnel_any(const char *tunnel_id);
 
-/* Pending queue operations */
-int  pending_queue_push(const char *tunnel_id, int browser_fd,
-                        const char *request, size_t request_len);
-int  pending_queue_pop(const char *tunnel_id, pending_request_t *out);
-void pending_queue_clear(const char *tunnel_id, int epfd);
-
-/* Serve next queued browser when tunnel becomes READY */
-void serve_next_pending(int epfd, connection_t *tunnel);
+/* Stream map operations on a tunnel */
+uint32_t tunnel_next_stream_id(connection_t *tunnel);
+int      tunnel_add_stream(connection_t *tunnel, uint32_t stream_id, int browser_fd);
+int      tunnel_find_browser(connection_t *tunnel, uint32_t stream_id);
+void     tunnel_remove_stream(connection_t *tunnel, uint32_t stream_id);
+void     tunnel_close_all_streams(connection_t *tunnel, int epfd);
 
 #endif

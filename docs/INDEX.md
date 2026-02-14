@@ -46,7 +46,7 @@ This project includes comprehensive, production-grade documentation designed to 
 **Complete wire protocol specification**
 
 #### Covers:
-- Binary frame format (12-byte header + payload)
+- Binary frame format (16-byte V2 header + payload)
 - All 6 frame types with examples:
   - FRAME_REGISTER_TUNNEL
   - FRAME_CONNECT_REQUEST

@@ -190,16 +190,7 @@ static void handle_initial_frame(int epfd, int fd) {
         if (total > 0) {
             full_buf[total] = '\0';
             int result = handle_http_request(fd, full_buf);
-            if (result == 0) return;   /* linked to tunnel */
-            if (result == 1) {
-                /* Queued - mark state so epoll ignores this fd until served */
-                connection_t *qc = connection_get(fd);
-                if (qc) qc->state = CONN_PUBLIC_QUEUED;
-                /* Disable EPOLLIN but keep HUP/ERR for disconnect detection */
-                struct epoll_event ev = { .events = EPOLLHUP | EPOLLERR, .data.fd = fd };
-                epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ev);
-                return;
-            }
+            if (result == 0) return;   /* linked to stream on tunnel */
         }
     }
 
@@ -217,32 +208,21 @@ static void handle_connection_event(int epfd, int fd, uint32_t events __attribut
         return;
     }
 
-    /* Queued browsers: just ignore (HUP/ERR handled by dispatch_event) */
-    if (c->state == CONN_PUBLIC_QUEUED) {
-        return;
-    }
-
-    /* Sanity: forwarding states must have a peer */
-    if (c->state != CONN_TUNNEL_READY && c->peer_fd <= 0) {
-        log_error("Connection fd=%d in state %d has no peer, closing", fd, c->state);
-        connection_close(epfd, fd);
-        return;
-    }
-
     char buf[FRAME_MAX_PAYLOAD];
     frame_type_t type;
     uint32_t len;
+    uint32_t stream_id;
 
     switch (c->state) {
         case CONN_PUBLIC_FORWARDING:
-            /* Browser -> Server -> Tunnel (as FRAME_DATA) */
+            /* Browser -> Server -> Tunnel (as FRAME_DATA tagged with stream_id) */
             {
                 ssize_t n = read(fd, buf, sizeof(buf));
                 if (n <= 0) {
                     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
                     if (n == 0) {
                         /* Browser finished sending (HTTP request complete).
-                           Don't close — response from tunnel is still expected.
+                           Don't close — response from tunnel still expected.
                            Just stop reading from this browser fd. */
                         struct epoll_event bev = {
                             .events = EPOLLHUP | EPOLLERR, .data.fd = fd
@@ -253,81 +233,81 @@ static void handle_connection_event(int epfd, int fd, uint32_t events __attribut
                     connection_close(epfd, fd);
                     return;
                 }
-                if (frame_write(c->peer_fd, FRAME_DATA, buf, (uint32_t)n) < 0) {
+                /* Tag with this browser's stream_id */
+                if (frame_write(c->peer_fd, FRAME_DATA, buf, (uint32_t)n, c->stream_id) < 0) {
                     log_error("Failed to forward data to tunnel (fd %d): %s",
                               c->peer_fd, strerror(errno));
-                    int dead_tunnel = c->peer_fd;
-                    connection_close(epfd, dead_tunnel);
+                    connection_close(epfd, fd);
                     return;
                 }
             }
             break;
 
         case CONN_TUNNEL_READY:
-            /* Tunnel is idle. Drain any stale frames from the previous
-               request cycle gracefully instead of killing the tunnel. */
+            /* Tunnel -> Server: read frames and demux by stream_id */
             {
-                int frame_result = frame_read(fd, &type, buf, &len);
-                if (frame_result == 0) {
-                    if (type == FRAME_DATA) {
-                        log_info("Discarding stale FRAME_DATA (%u bytes) on READY tunnel fd=%d",
-                                 len, fd);
-                    } else if (type == FRAME_CLOSE) {
-                        log_info("Received FRAME_CLOSE on READY tunnel fd=%d (stale cleanup)", fd);
-                    } else if (type == FRAME_REGISTER_TUNNEL) {
-                        connection_t *tc = connection_get(fd);
-                        if (tc) {
-                            snprintf(tc->tunnel_id, sizeof(tc->tunnel_id), "%.*s", (int)len, buf);
-                            log_info("Re-registered tunnel: %s (fd=%d)", tc->tunnel_id, fd);
-                        }
-                    } else {
-                        log_error("Unexpected frame type %d in READY state (fd=%d)", type, fd);
-                    }
-                } else if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) {
-                    log_error("Tunnel disconnected (fd=%d): %s", fd, strerror(errno));
-                    connection_close(epfd, fd);
-                } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != ETIMEDOUT) {
-                    log_error("Failed to read from tunnel (fd=%d): %s", fd, strerror(errno));
-                    connection_close(epfd, fd);
-                }
-            }
-            break;
-
-        case CONN_TUNNEL_FORWARDING:
-            /* Tunnel -> Server -> Browser (unwrap FRAME_DATA) */
-            if (frame_read(fd, &type, buf, &len) == 0) {
-                if (type == FRAME_DATA) {
-                    if (write_all(c->peer_fd, buf, len) < 0) {
-                        log_error("Write to browser failed (fd %d): %s",
-                                  c->peer_fd, strerror(errno));
-                        int dead_browser = c->peer_fd;
-                        connection_close(epfd, dead_browser);
+                if (frame_read(fd, &type, buf, &len, &stream_id) != 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT) {
                         return;
                     }
-                } else if (type == FRAME_CLOSE) {
-                    /* Client's local service closed - HTTP response is done.
-                       Manually unbind and close the browser. */
-                    int browser_fd = c->peer_fd;
-                    c->peer_fd = 0;
-                    c->state = CONN_TUNNEL_READY;
+                    log_error("Failed to read frame from tunnel fd=%d: %s", fd, strerror(errno));
+                    connection_close(epfd, fd);
+                    return;
+                }
 
-                    connection_t *b = connection_get(browser_fd);
-                    if (b) {
-                        b->peer_fd = 0;
-                        /* Close browser directly (already unbound, no cascade back) */
+                if (type == FRAME_REGISTER_TUNNEL) {
+                    /* Re-registration */
+                    snprintf(c->tunnel_id, sizeof(c->tunnel_id), "%.*s", (int)len, buf);
+                    log_info("Re-registered tunnel: %s (fd=%d)", c->tunnel_id, fd);
+                    return;
+                }
+
+                if (type == FRAME_DATA) {
+                    /* Route data to the correct browser by stream_id */
+                    int browser_fd = tunnel_find_browser(c, stream_id);
+                    if (browser_fd < 0) {
+                        /* Stream already closed (browser disconnected) — discard */
+                        return;
+                    }
+                    if (write_all(browser_fd, buf, len) < 0) {
+                        log_error("Write to browser fd=%d stream=%u failed: %s",
+                                  browser_fd, stream_id, strerror(errno));
+                        /* Close just this browser, not the tunnel */
+                        tunnel_remove_stream(c, stream_id);
+                        connection_t *b = connection_get(browser_fd);
+                        if (b) {
+                            b->peer_fd = 0;
+                            b->stream_id = 0;
+                        }
                         connection_close(epfd, browser_fd);
                     }
-                    fprintf(stderr, "[server] FRAME_CLOSE: tunnel fd=%d reset to READY, browser fd=%d closed\n",
-                            fd, browser_fd);
-
-                    /* Serve next queued browser request if any */
-                    serve_next_pending(epfd, c);
-                } else {
-                    log_error("Unexpected frame type %d from tunnel fd=%d", type, fd);
+                    return;
                 }
-            } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                log_error("Failed to read frame from tunnel: %s", strerror(errno));
-                connection_close(epfd, fd);
+
+                if (type == FRAME_CLOSE) {
+                    /* Client's local service closed for this stream — close that browser */
+                    int browser_fd = tunnel_find_browser(c, stream_id);
+                    tunnel_remove_stream(c, stream_id);
+                    if (browser_fd > 0) {
+                        connection_t *b = connection_get(browser_fd);
+                        if (b) {
+                            b->peer_fd = 0;
+                            b->stream_id = 0;
+                        }
+                        connection_close(epfd, browser_fd);
+                        fprintf(stderr, "[server] FRAME_CLOSE stream=%u: browser fd=%d closed (tunnel fd=%d, %d active streams)\n",
+                                stream_id, browser_fd, fd, c->stream_count);
+                    }
+                    return;
+                }
+
+                if (type == FRAME_ERROR) {
+                    log_error("FRAME_ERROR from tunnel fd=%d stream=%u: %.*s",
+                              fd, stream_id, (int)len, buf);
+                    return;
+                }
+
+                log_error("Unexpected frame type %d from tunnel fd=%d", type, fd);
             }
             break;
 
