@@ -2,6 +2,7 @@
 #define HANDLERS_H
 
 #include <sys/types.h>
+#include "connection.h"
 
 int handle_http_request(int fd, const char *peek_buf);
 int handle_rift_frame(int fd);

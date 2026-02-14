@@ -64,6 +64,12 @@ void connection_close(int epfd, int fd) {
     int peer = c->peer_fd;
     conn_state_t orig_state = c->state;
 
+    /* If a tunnel is dying, clear its pending queue */
+    if ((orig_state == CONN_TUNNEL_INIT || orig_state == CONN_TUNNEL_READY ||
+         orig_state == CONN_TUNNEL_FORWARDING) && c->tunnel_id[0] != '\0') {
+        pending_queue_clear(c->tunnel_id, epfd);
+    }
+
     c->fd = 0;
     c->peer_fd = 0;
     c->state = 0;
@@ -87,6 +93,8 @@ void connection_close(int epfd, int fd) {
                 p->state = CONN_TUNNEL_READY;
                 fprintf(stderr, "[connection] Browser closed (fd=%d), tunnel (fd=%d) reset to READY\n",
                         fd, peer);
+                /* Immediately serve next queued request */
+                serve_next_pending(epfd, p);
             }
         }
     }
@@ -106,4 +114,87 @@ connection_t* connection_find_tunnel(const char *tunnel_id) {
             return c;
     }
     return NULL;
+}
+
+connection_t* connection_find_tunnel_any(const char *tunnel_id) {
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
+        connection_t *c = &connections[i];
+        if (c->fd == 0) continue;
+        if (c->state != CONN_TUNNEL_READY && c->state != CONN_TUNNEL_FORWARDING)
+            continue;
+        if (strcmp(c->tunnel_id, tunnel_id) == 0)
+            return c;
+    }
+    return NULL;
+}
+
+/* ---- Pending request queue (flat array, one per tunnel_id) ---- */
+#include <stdlib.h>
+
+#define MAX_TUNNEL_QUEUES 256
+
+static struct {
+    char tunnel_id[ID_LEN];
+    pending_request_t items[MAX_PENDING_PER_TUNNEL];
+    int count;
+} queues[MAX_TUNNEL_QUEUES];
+
+static int find_queue_idx(const char *tid, int create) {
+    int free_slot = -1;
+    for (int i = 0; i < MAX_TUNNEL_QUEUES; i++) {
+        if (queues[i].tunnel_id[0] == '\0') {
+            if (free_slot < 0) free_slot = i;
+            continue;
+        }
+        if (strcmp(queues[i].tunnel_id, tid) == 0) return i;
+    }
+    if (create && free_slot >= 0) {
+        snprintf(queues[free_slot].tunnel_id, ID_LEN, "%s", tid);
+        queues[free_slot].count = 0;
+        return free_slot;
+    }
+    return -1;
+}
+
+int pending_queue_push(const char *tunnel_id, int browser_fd,
+                       const char *request, size_t request_len) {
+    int qi = find_queue_idx(tunnel_id, 1);
+    if (qi < 0 || queues[qi].count >= MAX_PENDING_PER_TUNNEL) return -1;
+    if (request_len > PENDING_REQUEST_MAX) return -1;
+    pending_request_t *p = &queues[qi].items[queues[qi].count++];
+    p->fd = browser_fd;
+    memcpy(p->request, request, request_len);
+    p->request_len = request_len;
+    return 0;
+}
+
+int pending_queue_pop(const char *tunnel_id, pending_request_t *out) {
+    int qi = find_queue_idx(tunnel_id, 0);
+    if (qi < 0 || queues[qi].count == 0) return -1;
+    *out = queues[qi].items[0];
+    queues[qi].count--;
+    for (int i = 0; i < queues[qi].count; i++)
+        queues[qi].items[i] = queues[qi].items[i + 1];
+    return 0;
+}
+
+void pending_queue_clear(const char *tunnel_id, int epfd) {
+    int qi = find_queue_idx(tunnel_id, 0);
+    if (qi < 0) return;
+    const char *msg = "Tunnel disconnected\n";
+    char resp[256];
+    int len = snprintf(resp, sizeof(resp),
+        "HTTP/1.1 502 Bad Gateway\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "%s", strlen(msg), msg);
+    for (int i = 0; i < queues[qi].count; i++) {
+        int bfd = queues[qi].items[i].fd;
+        if (write(bfd, resp, len) < 0) { /* best effort */ }
+        connection_close(epfd, bfd);
+    }
+    queues[qi].count = 0;
+    queues[qi].tunnel_id[0] = '\0';
 }

@@ -2,6 +2,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/epoll.h>
 #include "include/handlers.h"
 #include "include/connection.h"
 #include "include/frame.h"
@@ -61,13 +62,66 @@ int handle_http_request(int fd, const char *peek_buf) {
             return 0;
         }
 
-        fprintf(stderr, "[http] Tunnel not found or busy: %s\n", tunnel_id);
+        /* Tunnel exists but is busy — queue the request */
+        connection_t *busy = connection_find_tunnel_any(tunnel_id);
+        if (busy) {
+            size_t hdr_len = strlen(peek_buf);
+            if (pending_queue_push(tunnel_id, fd, peek_buf, hdr_len) == 0) {
+                fprintf(stderr, "[http] Tunnel %s busy, queued Browser(fd=%d)\n",
+                        tunnel_id, fd);
+                return 1;  /* 1 = queued, caller should NOT close */
+            }
+            fprintf(stderr, "[http] Pending queue full for %s\n", tunnel_id);
+        } else {
+            fprintf(stderr, "[http] Tunnel not found: %s\n", tunnel_id);
+        }
     } else {
         fprintf(stderr, "[http] No tunnel ID in request\n");
     }
 
     send_http_error(fd, "404 Not Found", "No Tunnel Specified or Found\n");
     return -1;
+}
+
+void serve_next_pending(int epfd, connection_t *tunnel) {
+    if (!tunnel || tunnel->state != CONN_TUNNEL_READY) return;
+    if (tunnel->tunnel_id[0] == '\0') return;
+
+    pending_request_t req;
+    while (pending_queue_pop(tunnel->tunnel_id, &req) == 0) {
+        /* Check browser is still alive */
+        connection_t *browser = connection_get(req.fd);
+        if (!browser || browser->fd == 0) {
+            continue;  /* browser died while queued, try next */
+        }
+
+        /* Re-enable EPOLLIN on the browser */
+        struct epoll_event ev = { .events = EPOLLIN | EPOLLHUP | EPOLLERR, .data.fd = req.fd };
+        epoll_ctl(epfd, EPOLL_CTL_MOD, req.fd, &ev);
+
+        /* Bind and forward */
+        connection_bind(req.fd, tunnel->fd);
+
+        if (frame_write(tunnel->fd, FRAME_CONNECT_REQUEST, "NEW", 3) < 0) {
+            fprintf(stderr, "[queue] Failed CONNECT_REQUEST: %s\n", strerror(errno));
+            connection_close(epfd, req.fd);
+            tunnel->peer_fd = 0;
+            tunnel->state = CONN_TUNNEL_READY;
+            continue;
+        }
+
+        if (frame_write(tunnel->fd, FRAME_DATA, req.request, (uint32_t)req.request_len) < 0) {
+            fprintf(stderr, "[queue] Failed to forward queued request: %s\n", strerror(errno));
+            connection_close(epfd, req.fd);
+            tunnel->peer_fd = 0;
+            tunnel->state = CONN_TUNNEL_READY;
+            continue;
+        }
+
+        fprintf(stderr, "[queue] Served queued Browser(fd=%d) on Tunnel(%s)\n",
+                req.fd, tunnel->tunnel_id);
+        return;  /* successfully served one — tunnel is now FORWARDING */
+    }
 }
 
 int handle_rift_frame(int fd) {

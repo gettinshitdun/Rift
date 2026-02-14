@@ -189,7 +189,17 @@ static void handle_initial_frame(int epfd, int fd) {
         ssize_t total = recv(fd, full_buf, sizeof(full_buf) - 1, 0);
         if (total > 0) {
             full_buf[total] = '\0';
-            if (handle_http_request(fd, full_buf) == 0) return;
+            int result = handle_http_request(fd, full_buf);
+            if (result == 0) return;   /* linked to tunnel */
+            if (result == 1) {
+                /* Queued - mark state so epoll ignores this fd until served */
+                connection_t *qc = connection_get(fd);
+                if (qc) qc->state = CONN_PUBLIC_QUEUED;
+                /* Disable EPOLLIN but keep HUP/ERR for disconnect detection */
+                struct epoll_event ev = { .events = EPOLLHUP | EPOLLERR, .data.fd = fd };
+                epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ev);
+                return;
+            }
         }
     }
 
@@ -204,6 +214,11 @@ static void handle_connection_event(int epfd, int fd, uint32_t events __attribut
     /* Handle initial handshakes */
     if (c->state == CONN_TUNNEL_INIT || c->state == CONN_PUBLIC_INIT) {
         handle_initial_frame(epfd, fd);
+        return;
+    }
+
+    /* Queued browsers: just ignore (HUP/ERR handled by dispatch_event) */
+    if (c->state == CONN_PUBLIC_QUEUED) {
         return;
     }
 
@@ -225,6 +240,16 @@ static void handle_connection_event(int epfd, int fd, uint32_t events __attribut
                 ssize_t n = read(fd, buf, sizeof(buf));
                 if (n <= 0) {
                     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+                    if (n == 0) {
+                        /* Browser finished sending (HTTP request complete).
+                           Don't close — response from tunnel is still expected.
+                           Just stop reading from this browser fd. */
+                        struct epoll_event bev = {
+                            .events = EPOLLHUP | EPOLLERR, .data.fd = fd
+                        };
+                        epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &bev);
+                        return;
+                    }
                     connection_close(epfd, fd);
                     return;
                 }
@@ -294,6 +319,9 @@ static void handle_connection_event(int epfd, int fd, uint32_t events __attribut
                     }
                     fprintf(stderr, "[server] FRAME_CLOSE: tunnel fd=%d reset to READY, browser fd=%d closed\n",
                             fd, browser_fd);
+
+                    /* Serve next queued browser request if any */
+                    serve_next_pending(epfd, c);
                 } else {
                     log_error("Unexpected frame type %d from tunnel fd=%d", type, fd);
                 }
