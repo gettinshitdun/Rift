@@ -18,6 +18,19 @@
 #define MAX_RECONNECT_ATTEMPTS 5
 #define RECONNECT_DELAY_BASE 2  // seconds
 
+
+// ---- CLI Colors ----
+#define CLR_RESET   "\033[0m"
+#define CLR_BOLD    "\033[1m"
+#define CLR_DIM     "\033[2m"
+#define CLR_GREEN   "\033[32m"
+#define CLR_RED     "\033[31m"
+#define CLR_YELLOW  "\033[33m"
+#define CLR_BLUE    "\033[34m"
+#define CLR_CYAN    "\033[36m"
+#define CLR_GRAY    "\033[90m"
+
+
 /* Maximum concurrent streams (matches server) */
 #define MAX_STREAMS 128
 
@@ -319,75 +332,93 @@ int reconnect_to_server(const char *server_ip, int server_port, const char *tunn
 
 int main(int argc, char *argv[]) {
     // Parse arguments - support verbose flag
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s [--verbose] expose <port>\n", argv[0]);
-        fprintf(stderr, "  --verbose    Enable debug logging\n");
+        if (argc < 3) {
+        fprintf(stderr,
+            CLR_BOLD "Usage:\n" CLR_RESET
+            "  %s [--verbose] expose <port>\n\n"
+            CLR_DIM "Options:\n"
+            "  --verbose    Enable debug logging\n" CLR_RESET,
+            argv[0]);
         return 1;
     }
-    
+
     int arg_idx = 1;
     if (argc >= 4 && strcmp(argv[1], "--verbose") == 0) {
         verbose = 1;
         arg_idx = 2;
     }
-    
+
     if (strcmp(argv[arg_idx], "expose") != 0) {
-        fprintf(stderr, "Usage: %s [--verbose] expose <port>\n", argv[0]);
+        fprintf(stderr,
+            CLR_RED "✖ Invalid command\n" CLR_RESET
+            "Usage: %s [--verbose] expose <port>\n",
+            argv[0]);
         return 1;
     }
 
     int local_port = atoi(argv[arg_idx + 1]);
     if (local_port <= 0 || local_port > 65535) {
-        fprintf(stderr, "Error: Invalid port %d\n", local_port);
+        fprintf(stderr, CLR_RED "✖ Invalid port: %d\n" CLR_RESET, local_port);
         return 1;
     }
 
-    // Check if local service is running on the port
-    printf("Checking local service on port %d...\n", local_port);
+    // Check if local service is running
+    printf(CLR_BLUE "➜ Checking local service on port %d...\n" CLR_RESET, local_port);
     if (check_local_service(local_port) < 0) {
-        fprintf(stderr, "Error: No service found running on port %d\n", local_port);
-        fprintf(stderr, "Please start your local service first, then run:\n");
-        fprintf(stderr, "  %s expose %d\n", argv[0], local_port);
+        fprintf(stderr,
+            CLR_RED "✖ No service found running on port %d\n" CLR_RESET
+            CLR_DIM "Start your local service first, then run:\n"
+            "  %s expose %d\n" CLR_RESET,
+            local_port, argv[0], local_port);
         return 1;
     }
-    printf("✓ Local service detected on port %d\n", local_port);
+    printf(CLR_GREEN "✔ Local service detected on port %d\n" CLR_RESET, local_port);
 
-    // Allow server address override via environment variable for testing
+    // Allow server override via env
     const char *server_ip = getenv("RIFT_SERVER_IP");
-    if (!server_ip) {
-        server_ip = DEFAULT_SERVER_IP;
-    }
+    if (!server_ip) server_ip = DEFAULT_SERVER_IP;
+
     int server_port = DEFAULT_SERVER_PORT;
     const char *server_port_env = getenv("RIFT_SERVER_PORT");
-    if (server_port_env) {
-        server_port = atoi(server_port_env);
-    }
+    if (server_port_env) server_port = atoi(server_port_env);
 
     char tunnel_id[64];
     generate_random_id(tunnel_id, sizeof(tunnel_id));
 
-    printf("\n--- RIFT CLIENT v2 (stream multiplex) ---\n");
-    printf("Forwarding: localhost:%d <---> Rift Server\n", local_port);
-    printf("Tunnel ID:  %s\n", tunnel_id);
-    printf("\n📡 Public URLs:\n");
-    printf("   http://%s.rift.kanishakmittal.site\n", tunnel_id);
-    printf("   https://%s.rift.kanishakmittal.site\n", tunnel_id);
-    printf("-------------------\n\n");
+    // ---------- Banner ----------
+    printf("\n" CLR_BOLD CLR_CYAN);
+    printf("╔══════════════════════════════════════════════════════════════════════╗\n");
+    printf("║                       RIFT CLIENT v2 — TUNNEL READY                  ║\n");
+    printf("╚══════════════════════════════════════════════════════════════════════╝\n");
+    printf(CLR_RESET);
+
+    printf("\n" CLR_BOLD "🔁 Forwarding:" CLR_RESET " localhost:%d  ⇄  Rift Server\n", local_port);
+    printf(CLR_BOLD "🆔 Tunnel ID:" CLR_RESET " %s\n", tunnel_id);
+
+    printf("\n" CLR_BOLD "🌐 Public Access URLs" CLR_RESET "\n");
+    printf("   " CLR_GREEN "HTTP : " CLR_RESET "http://%s.rift.kanishakmittal.site\n", tunnel_id);
+    printf("   " CLR_GREEN "HTTPS: " CLR_RESET "https://%s.rift.kanishakmittal.site\n", tunnel_id);
+    printf(CLR_DIM "──────────────────────────────────────────────────────────────────────\n" CLR_RESET);
 
     int server_fd = tcp_connect(server_ip, server_port);
     if (server_fd < 0) {
         ERR("Could not connect to Rift Server");
         return 1;
     }
+
+    printf(CLR_GREEN "✔ Connected to Rift Server (%s:%d)\n" CLR_RESET, server_ip, server_port);
     LOG("Connected to server, fd=%d", server_fd);
 
-    // Register tunnel (stream_id=0 for control frames)
+    // Register tunnel
     LOG("Sending registration frame for tunnel: %s", tunnel_id);
-    if (frame_write(server_fd, FRAME_REGISTER_TUNNEL, tunnel_id, (uint32_t)strlen(tunnel_id), 0) < 0) {
+    if (frame_write(server_fd, FRAME_REGISTER_TUNNEL, tunnel_id,
+                    (uint32_t)strlen(tunnel_id), 0) < 0) {
         ERR("Failed to send registration frame");
         close(server_fd);
         return 1;
     }
+
+    printf(CLR_GREEN "✔ Tunnel registered successfully\n" CLR_RESET);
     LOG("Registration successful");
 
     int epfd = epoll_create1(0);
@@ -403,7 +434,9 @@ int main(int argc, char *argv[]) {
     ev.data.fd = server_fd;
     epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &ev);
 
+    printf(CLR_DIM "Event loop started (stream multiplexing mode)\n" CLR_RESET);
     LOG("Event loop started (stream multiplexing mode)");
+
     while (1) {
         int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
         if (nfds < 0) {
