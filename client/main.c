@@ -25,6 +25,27 @@ static int verbose = 0;
 #define WARN(fmt, ...) fprintf(stderr, "[WARN] " fmt "\n", ##__VA_ARGS__)
 #define ERR(fmt, ...) fprintf(stderr, "[ERROR] " fmt "\n", ##__VA_ARGS__)
 
+// Reliable write: retries on partial writes and EAGAIN
+static int write_all(int fd, const char *buf, size_t len) {
+    size_t off = 0;
+    int retries = 0;
+    while (off < len) {
+        ssize_t n = write(fd, buf + off, len - off);
+        if (n > 0) { off += n; retries = 0; }
+        else if (n == 0) { return -1; }
+        else {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (++retries > 50) return -1;
+                usleep(1000);
+                continue;
+            }
+            return -1;
+        }
+    }
+    return 0;
+}
+
 typedef struct {
     char buf[FRAME_MAX_PAYLOAD + 16];
     size_t len;
@@ -395,16 +416,14 @@ int main(int argc, char *argv[]) {
                         }
                         else if (type == FRAME_DATA) {
                             if (local_fd > 0) {
-                                ssize_t written = write(local_fd, payload, len);
-                                if (written < 0) {
-                                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                                        perror("[!] Write to local service failed");
-                                    }
-                                } else if (written != (ssize_t)len) {
-                                    fprintf(stderr, "[!] Partial write: %ld/%u bytes\n", written, len);
+                                if (write_all(local_fd, payload, len) < 0) {
+                                    ERR("Write to local service failed: %s", strerror(errno));
+                                    epoll_ctl(epfd, EPOLL_CTL_DEL, local_fd, NULL);
+                                    close(local_fd);
+                                    local_fd = -1;
                                 }
                             } else {
-                                printf("[!] Dropped %u bytes (no local connection)\n", len);
+                                WARN("Dropped %u bytes (no local connection)", len);
                             }
                         }
                         else if (type == FRAME_CLOSE) {
@@ -433,11 +452,18 @@ int main(int argc, char *argv[]) {
                         ssize_t n = read(local_fd, buffer, sizeof(buffer));
                         if (n > 0) {
                             if (frame_write(server_fd, FRAME_DATA, buffer, (uint32_t)n) < 0) {
-                                ERR("Failed to send to server: %s", strerror(errno));
-                                if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) {
+                                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT) {
+                                    // Server backpressure — stop reading from local for now.
+                                    // epoll will wake us again when local_fd has data.
+                                    LOG("Server backpressure (write returned %s), pausing local reads",
+                                        strerror(errno));
+                                    break;
+                                } else if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) {
+                                    ERR("Server connection lost: %s", strerror(errno));
                                     LOG("Server connection lost during write, will reconnect on next epoll event");
                                     break;
                                 } else {
+                                    ERR("Failed to send to server: %s", strerror(errno));
                                     goto cleanup;
                                 }
                             }

@@ -4,26 +4,44 @@
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
+#include <poll.h>
 
-// Helper to ensure we write everything even if the kernel buffer is full
+// Helper to ensure we write everything even if the kernel buffer is full.
+// Uses poll(POLLOUT) with a total timeout of 30 seconds to handle
+// backpressure during heavy transfers (video, large PDFs, etc.).
 static int write_full(int fd, const void *buf, size_t len) {
     size_t off = 0;
-    int retries = 0;
-    const int MAX_RETRIES = 10;
+    const int POLL_INTERVAL_MS = 5000;  // 5s per poll call
+    const int MAX_POLLS = 6;            // 30s total timeout
 
     while (off < len) {
         ssize_t n = write(fd, (const char*)buf + off, len - off);
         if (n > 0) {
             off += n;
-            retries = 0;  // Reset on success
         } else if (n == 0) {
             return -1;  // Socket closed
         } else {
-            if ((errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
-                if (++retries > MAX_RETRIES) {
-                    return -1;  // Too many retries
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // Loop poll() to handle extended backpressure
+                int ready = 0;
+                for (int attempt = 0; attempt < MAX_POLLS; attempt++) {
+                    struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+                    int pr = poll(&pfd, 1, POLL_INTERVAL_MS);
+                    if (pr > 0) {
+                        if (pfd.revents & (POLLERR | POLLHUP)) return -1;
+                        ready = 1;
+                        break;
+                    }
+                    if (pr < 0 && errno != EINTR) return -1;
+                    // pr == 0: timeout, try again
                 }
-                usleep(10);  // Shorter sleep than before
+                if (!ready) {
+                    errno = ETIMEDOUT;
+                    return -1;
+                }
                 continue;
             }
             return -1;  // Real error
@@ -36,7 +54,7 @@ static int write_full(int fd, const void *buf, size_t len) {
 static int read_full(int fd, void *buf, size_t len) {
     size_t off = 0;
     int retries = 0;
-    const int MAX_RETRIES = 5;  // Reduced retries for faster timeout
+    const int MAX_RETRIES = 30;
 
     while (off < len) {
         ssize_t n = read(fd, (char*)buf + off, len - off);
@@ -55,9 +73,9 @@ static int read_full(int fd, void *buf, size_t len) {
             }
 
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // Data not available yet - retry
+                // Data not available yet - retry with backoff
                 if (++retries < MAX_RETRIES) {
-                    usleep(100);  // Wait a bit for data to arrive
+                    usleep(1000);  // 1ms wait for data to arrive
                     continue;
                 }
                 // Give up after max retries
@@ -122,13 +140,13 @@ int frame_write(int fd, frame_type_t type, const char *payload, uint32_t len) {
     hdr.type = htons((uint16_t)type);
     hdr.length = htonl(len);
 
-    if (write_full(fd, &hdr, sizeof(hdr)) < 0)
-        return -1;
-
+    // Combine header + payload into a single buffer for atomic write.
+    // Prevents protocol desync if connection drops between two separate writes.
+    char frame_buf[sizeof(frame_header_t) + FRAME_MAX_PAYLOAD];
+    memcpy(frame_buf, &hdr, sizeof(hdr));
     if (len > 0 && payload != NULL) {
-        if (write_full(fd, payload, len) < 0)
-            return -1;
+        memcpy(frame_buf + sizeof(hdr), payload, len);
     }
 
-    return 0;
+    return write_full(fd, frame_buf, sizeof(hdr) + len);
 }

@@ -6,11 +6,6 @@
 #include "include/connection.h"
 #include "include/frame.h"
 
-/* --- Helpers --- */
-
-/**
- * Sends a standard HTTP error response to a browser if a tunnel is missing.
- */
 void send_http_error(int fd, const char *status, const char *msg) {
     char resp[256];
     int len = snprintf(resp, sizeof(resp),
@@ -23,28 +18,21 @@ void send_http_error(int fd, const char *status, const char *msg) {
     if (write(fd, resp, len) < 0) perror("write error");
 }
 
-/* --- Handlers --- */
-
-/**
- * Handles the initial HTTP request from a browser.
- * Extracts the Tunnel ID from the 'Host' header or 'X-Tunnel-Id'.
- */
 int handle_http_request(int fd, const char *peek_buf) {
     char tunnel_id[64] = {0};
 
+    /* Try X-Tunnel-Id header first */
     char *custom_hdr = strstr(peek_buf, "x-tunnel-id: ");
-    if (!custom_hdr) {
+    if (!custom_hdr)
         custom_hdr = strstr(peek_buf, "X-Tunnel-Id: ");
-    }
     if (custom_hdr) {
         const char *start = strchr(custom_hdr, ':') + 2;
         sscanf(start, "%63s", tunnel_id);
-    }
-    else {
+    } else {
+        /* Fall back to Host header (subdomain extraction) */
         char *host_hdr = strstr(peek_buf, "Host: ");
-        if (host_hdr) {
+        if (host_hdr)
             sscanf(host_hdr + 6, "%63[^.:\r\n]", tunnel_id);
-        }
     }
 
     if (tunnel_id[0] != '\0') {
@@ -68,11 +56,12 @@ int handle_http_request(int fd, const char *peek_buf) {
                 return -1;
             }
 
-            fprintf(stderr, "[http] Linked Browser(fd=%d) to Tunnel(%s), sent %zu bytes\n", fd, tunnel_id, hdr_len);
+            fprintf(stderr, "[http] Linked Browser(fd=%d) to Tunnel(%s), sent %zu bytes\n",
+                    fd, tunnel_id, hdr_len);
             return 0;
-        } else {
-            fprintf(stderr, "[http] Tunnel not found: %s\n", tunnel_id);
         }
+
+        fprintf(stderr, "[http] Tunnel not found or busy: %s\n", tunnel_id);
     } else {
         fprintf(stderr, "[http] No tunnel ID in request\n");
     }
@@ -80,33 +69,24 @@ int handle_http_request(int fd, const char *peek_buf) {
     send_http_error(fd, "404 Not Found", "No Tunnel Specified or Found\n");
     return -1;
 }
-/**
- * Handles the initial binary frame from the Rift Client.
- * Consumes the 'RIFT' header and registers the tunnel ID.
- */
+
 int handle_rift_frame(int fd) {
     frame_type_t type;
     char payload[FRAME_MAX_PAYLOAD + 1];
     uint32_t len;
 
-    // frame_read handles the binary header (12 bytes) and consumes it from the socket
     if (frame_read(fd, &type, payload, &len) < 0) return -1;
 
     connection_t *c = connection_get(fd);
     if (!c) return -1;
 
-    // Scenario A: Standard registration from client
     if (type == FRAME_REGISTER_TUNNEL) {
         snprintf(c->tunnel_id, sizeof(c->tunnel_id), "%.*s", (int)len, payload);
-
-        // TRANSITION STATE: Move to active tunnel mode
         c->state = CONN_TUNNEL_READY;
-
         fprintf(stderr, "[tunnel] Registered: %s (fd=%d)\n", c->tunnel_id, fd);
         return 0;
     }
 
-    // Scenario B: Client requesting a bind to an existing service
     if (type == FRAME_CONNECT_REQUEST) {
         char service_id[64] = {0};
         snprintf(service_id, sizeof(service_id), "%.*s", (int)len, payload);

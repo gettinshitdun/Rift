@@ -36,19 +36,13 @@ connection_t* connection_get(int fd) {
 
 void connection_add_tunnel(int fd) {
     connection_t *c = connection_alloc(fd);
-    if (!c) {
-        close(fd);
-        return;
-    }
+    if (!c) { close(fd); return; }
     c->state = CONN_TUNNEL_INIT;
 }
 
 void connection_add_public(int fd) {
     connection_t *c = connection_alloc(fd);
-    if (!c) {
-        close(fd);
-        return;
-    }
+    if (!c) { close(fd); return; }
     c->state = CONN_PUBLIC_INIT;
 }
 
@@ -85,32 +79,16 @@ void connection_close(int epfd, int fd) {
         if (p && p->peer_fd == fd) {
             p->peer_fd = 0;
             if (orig_state == CONN_TUNNEL_READY || orig_state == CONN_TUNNEL_FORWARDING) {
-                // Tunnel connection is closing - close its paired browser connection
+                /* Tunnel closing - close its paired browser */
                 connection_close(epfd, peer);
-            } else if (orig_state == CONN_PUBLIC_INIT || orig_state == CONN_PUBLIC_FORWARDING) {
-                // Browser connection is closing - need to handle properly
-                if (orig_state == CONN_PUBLIC_FORWARDING) {
-                    // Browser cancelled during active request - notify tunnel to abort
-                    if (frame_write(peer, FRAME_CLOSE, "browser_cancelled", 17) < 0) {
-                        fprintf(stderr, "[connection] Failed to notify tunnel of browser cancellation (fd=%d): %s\n", peer, strerror(errno));
-                    }
-                }
-                p->state = CONN_TUNNEL_READY;  // Reset tunnel to ready for next browser request
-                fprintf(stderr, "[connection] Browser closed (fd=%d), tunnel (fd=%d) reset to ready\n", fd, peer);
+            } else if (orig_state == CONN_PUBLIC_FORWARDING) {
+                /* Browser closing - notify tunnel, reset to READY */
+                frame_write(peer, FRAME_CLOSE, "browser_cancelled", 17);
+                p->state = CONN_TUNNEL_READY;
+                fprintf(stderr, "[connection] Browser closed (fd=%d), tunnel (fd=%d) reset to READY\n",
+                        fd, peer);
             }
         }
-    }
-}
-
-void connection_reset_public(int fd) {
-    connection_t *c = connection_get(fd);
-    if (!c || c->fd == 0) return;
-
-    if (c->state == CONN_PUBLIC_FORWARDING) {
-        c->peer_fd = 0;
-        c->state = CONN_PUBLIC_INIT;
-        c->service_id[0] = '\0';
-        fprintf(stderr, "[connection] Reset public connection (fd=%d) back to INIT state for next request\n", fd);
     }
 }
 
@@ -121,19 +99,11 @@ int connection_active_count(void) {
 connection_t* connection_find_tunnel(const char *tunnel_id) {
     for (int i = 0; i < MAX_CONNECTIONS; i++) {
         connection_t *c = &connections[i];
-
-        if (c->fd == 0)
-            continue;
-
-        if (c->state != CONN_TUNNEL_READY)
-            continue;
-
-        if (c->peer_fd != 0)
-            continue;
-
+        if (c->fd == 0) continue;
+        if (c->state != CONN_TUNNEL_READY) continue;
+        if (c->peer_fd != 0) continue;
         if (strcmp(c->tunnel_id, tunnel_id) == 0)
             return c;
     }
     return NULL;
 }
-
