@@ -174,7 +174,8 @@ static void handle_initial_frame(int epfd, int fd) {
     buf[n] = '\0';
 
     if (memcmp(buf, "RIFT", 4) == 0) {
-        if (handle_rift_frame(fd) == 0) return;
+        connection_t *c = connection_get(fd);
+        if (c && handle_rift_frame(c) == 0) return;
     }
     else if (memcmp(buf, "GET ", 4) == 0 ||
              memcmp(buf, "POST", 4) == 0 ||
@@ -244,11 +245,13 @@ static void handle_connection_event(int epfd, int fd, uint32_t events __attribut
             break;
 
         case CONN_TUNNEL_READY:
-            /* Tunnel -> Server: read frames and demux by stream_id */
-            {
-                if (frame_read(fd, &type, buf, &len, &stream_id) != 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT) {
-                        return;
+            /* Tunnel -> Server: read frames and demux by stream_id.
+               Uses buffered reader to handle partial TCP reads safely. */
+            while (1) {
+                int rc = connection_frame_read(c, &type, buf, &len, &stream_id);
+                if (rc != 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EBADMSG) {
+                        return;  /* incomplete frame, wait for more data */
                     }
                     log_error("Failed to read frame from tunnel fd=%d: %s", fd, strerror(errno));
                     connection_close(epfd, fd);
@@ -259,7 +262,7 @@ static void handle_connection_event(int epfd, int fd, uint32_t events __attribut
                     /* Re-registration */
                     snprintf(c->tunnel_id, sizeof(c->tunnel_id), "%.*s", (int)len, buf);
                     log_info("Re-registered tunnel: %s (fd=%d)", c->tunnel_id, fd);
-                    return;
+                    continue;
                 }
 
                 if (type == FRAME_DATA) {
@@ -267,7 +270,7 @@ static void handle_connection_event(int epfd, int fd, uint32_t events __attribut
                     int browser_fd = tunnel_find_browser(c, stream_id);
                     if (browser_fd < 0) {
                         /* Stream already closed (browser disconnected) — discard */
-                        return;
+                        continue;
                     }
                     if (write_all(browser_fd, buf, len) < 0) {
                         log_error("Write to browser fd=%d stream=%u failed: %s",
@@ -281,7 +284,7 @@ static void handle_connection_event(int epfd, int fd, uint32_t events __attribut
                         }
                         connection_close(epfd, browser_fd);
                     }
-                    return;
+                    continue;
                 }
 
                 if (type == FRAME_CLOSE) {
@@ -298,13 +301,13 @@ static void handle_connection_event(int epfd, int fd, uint32_t events __attribut
                         fprintf(stderr, "[server] FRAME_CLOSE stream=%u: browser fd=%d closed (tunnel fd=%d, %d active streams)\n",
                                 stream_id, browser_fd, fd, c->stream_count);
                     }
-                    return;
+                    continue;
                 }
 
                 if (type == FRAME_ERROR) {
                     log_error("FRAME_ERROR from tunnel fd=%d stream=%u: %.*s",
                               fd, stream_id, (int)len, buf);
-                    return;
+                    continue;
                 }
 
                 log_error("Unexpected frame type %d from tunnel fd=%d", type, fd);

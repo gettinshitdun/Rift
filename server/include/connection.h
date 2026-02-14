@@ -3,9 +3,13 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "frame.h"
 
 #define MAX_CONNECTIONS 102400
 #define ID_LEN 64
+
+/* Per-connection read buffer size: header + max payload + slack */
+#define CONN_RBUF_SIZE (sizeof(frame_header_t) + FRAME_MAX_PAYLOAD + 64)
 
 /* Maximum concurrent streams (browser connections) per tunnel */
 #define MAX_STREAMS_PER_TUNNEL 128
@@ -34,6 +38,11 @@ typedef struct {
     /* Stream map — only used by tunnel connections */
     stream_entry_t streams[MAX_STREAMS_PER_TUNNEL];
     int stream_count;
+
+    /* Per-connection read buffer for non-blocking frame reassembly.
+       Prevents partial-read data loss across epoll_wait cycles. */
+    char  *rbuf;       /* heap-allocated on first tunnel use */
+    size_t rbuf_len;   /* bytes currently buffered */
 } connection_t;
 
 void connection_init(void);
@@ -52,5 +61,10 @@ int      tunnel_add_stream(connection_t *tunnel, uint32_t stream_id, int browser
 int      tunnel_find_browser(connection_t *tunnel, uint32_t stream_id);
 void     tunnel_remove_stream(connection_t *tunnel, uint32_t stream_id);
 void     tunnel_close_all_streams(connection_t *tunnel, int epfd);
+
+/* Buffered frame read: accumulates partial data in c->rbuf across calls.
+   Returns 0 on success, -1 on error (check errno: EAGAIN = incomplete). */
+int connection_frame_read(connection_t *c, frame_type_t *type,
+                          char *payload, uint32_t *len, uint32_t *stream_id);
 
 #endif

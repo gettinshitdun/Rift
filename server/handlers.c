@@ -101,22 +101,19 @@ int handle_http_request(int fd, const char *peek_buf) {
     return -1;
 }
 
-int handle_rift_frame(int fd) {
+int handle_rift_frame(connection_t *c) {
     frame_type_t type;
     char payload[FRAME_MAX_PAYLOAD + 1];
     uint32_t len;
     uint32_t stream_id;
 
-    if (frame_read(fd, &type, payload, &len, &stream_id) < 0) return -1;
-
-    connection_t *c = connection_get(fd);
-    if (!c) return -1;
+    if (connection_frame_read(c, &type, payload, &len, &stream_id) < 0) return -1;
 
     if (type == FRAME_REGISTER_TUNNEL) {
         snprintf(c->tunnel_id, sizeof(c->tunnel_id), "%.*s", (int)len, payload);
         c->state = CONN_TUNNEL_READY;
         c->stream_count = 0;
-        fprintf(stderr, "[tunnel] Registered: %s (fd=%d)\n", c->tunnel_id, fd);
+        fprintf(stderr, "[tunnel] Registered: %s (fd=%d)\n", c->tunnel_id, c->fd);
         return 0;
     }
 

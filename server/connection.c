@@ -1,6 +1,7 @@
 #include "include/connection.h"
 #include "include/frame.h"
 #include <string.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <errno.h>
@@ -58,6 +59,13 @@ void connection_close(int epfd, int fd) {
     if (orig_state == CONN_TUNNEL_INIT || orig_state == CONN_TUNNEL_READY) {
         tunnel_close_all_streams(c, epfd);
     }
+
+    /* Free per-connection read buffer */
+    if (c->rbuf) {
+        free(c->rbuf);
+        c->rbuf = NULL;
+    }
+    c->rbuf_len = 0;
 
     c->fd = 0;
     c->peer_fd = 0;
@@ -168,4 +176,95 @@ void tunnel_close_all_streams(connection_t *tunnel, int epfd) {
         }
     }
     tunnel->stream_count = 0;
+}
+/* ---- Buffered frame read for non-blocking tunnel fds ---- */
+
+int connection_frame_read(connection_t *c, frame_type_t *type,
+                          char *payload, uint32_t *len, uint32_t *stream_id)
+{
+    /* Lazy-allocate the read buffer on first use */
+    if (!c->rbuf) {
+        c->rbuf = malloc(CONN_RBUF_SIZE);
+        if (!c->rbuf) {
+            errno = ENOMEM;
+            return -1;
+        }
+        c->rbuf_len = 0;
+    }
+
+    /* 1. Drain as much data as the kernel has ready */
+    while (c->rbuf_len < CONN_RBUF_SIZE) {
+        ssize_t n = read(c->fd, c->rbuf + c->rbuf_len,
+                         CONN_RBUF_SIZE - c->rbuf_len);
+        if (n > 0) {
+            c->rbuf_len += n;
+        } else if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            if (errno == EINTR) continue;
+            return -1;  /* real error */
+        } else {
+            /* n == 0: peer closed */
+            errno = ECONNRESET;
+            return -1;
+        }
+    }
+
+    /* 2. Need at least a full header */
+    if (c->rbuf_len < sizeof(frame_header_t)) {
+        errno = EAGAIN;
+        return -1;
+    }
+
+    /* 3. Parse header from buffer */
+    frame_header_t *hdr = (frame_header_t *)c->rbuf;
+    uint32_t magic   = ntohl(hdr->magic);
+    uint8_t  version = hdr->version;
+    uint16_t h_type  = ntohs(hdr->type);
+    uint32_t h_len   = ntohl(hdr->length);
+    uint32_t h_sid   = ntohl(hdr->stream_id);
+
+    if (magic != FRAME_MAGIC) {
+        fprintf(stderr, "[frame] Magic mismatch: got 0x%08x, expected 0x%08x\n",
+                magic, FRAME_MAGIC);
+        /* Try to resync: skip one byte */
+        memmove(c->rbuf, c->rbuf + 1, c->rbuf_len - 1);
+        c->rbuf_len--;
+        errno = EBADMSG;
+        return -1;
+    }
+
+    if (version != FRAME_VERSION) {
+        fprintf(stderr, "[frame] Unsupported version: %d (expected %d)\n",
+                version, FRAME_VERSION);
+        errno = EPROTO;
+        return -1;
+    }
+
+    if (h_len > FRAME_MAX_PAYLOAD) {
+        fprintf(stderr, "[frame] Payload too large: %u (max %u)\n",
+                h_len, FRAME_MAX_PAYLOAD);
+        errno = EMSGSIZE;
+        return -1;
+    }
+
+    /* 4. Need header + full payload */
+    size_t frame_total = sizeof(frame_header_t) + h_len;
+    if (c->rbuf_len < frame_total) {
+        errno = EAGAIN;
+        return -1;  /* incomplete payload, wait for more data */
+    }
+
+    /* 5. Extract frame */
+    *type      = (frame_type_t)h_type;
+    *len       = h_len;
+    *stream_id = h_sid;
+    if (h_len > 0) {
+        memcpy(payload, c->rbuf + sizeof(frame_header_t), h_len);
+    }
+
+    /* 6. Remove consumed frame from buffer */
+    memmove(c->rbuf, c->rbuf + frame_total, c->rbuf_len - frame_total);
+    c->rbuf_len -= frame_total;
+
+    return 0;
 }
